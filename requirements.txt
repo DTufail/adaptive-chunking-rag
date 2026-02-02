@@ -1,0 +1,10 @@
+sentence-transformers
+faiss-cpu
+chromadb
+pandas
+numpy
+spacy
+nltk
+pyyaml
+plotly
+tqdm
