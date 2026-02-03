@@ -1,0 +1,243 @@
+(myenv) daniyal@192 adaptive-chunking-rag % cd /Users/daniyal/adaptive-chunking-rag
+python tests/test_chunkers.py
+
+
+======================================================================
+  EXAMPLE 63
+======================================================================
+  Question : Who decided to place Beyonce's group in Star Search the talent show?
+  Answer   : Arne Frager
+  Context  : 1371 chars
+──────────────────────────────────────────────────────────────────────
+
+  📦  FixedChunker
+──────────────────────────────────────────────────────────────────────
+    Count: 3 chunks | Min: 447 | Max: 512 | Avg: 490 chars
+
+    Chunk  0 | pos [   0: 512] | len  512 chars
+      "At age eight, Beyoncé and childhood friend Kelly Rowland met LaTavia Roberson while in an audition for an all-girl entertainment group. They were placed into a group with three other girls as Girl's Tyme, and rapped and danced on the talent show circuit in Houston. After seeing the group, R&B producer Arne Frager brought them to his Northern California studio and placed them in Star Search, the largest talent show on national TV at the time. Girl's Tyme failed to win, and Beyoncé later said the song they pe"
+
+    Chunk  1 | pos [ 462: 974] | len  512 chars
+      "ed to win, and Beyoncé later said the song they performed was not good. In 1995 Beyoncé's father resigned from his job to manage the group. The move reduced Beyoncé's family's income by half, and her parents were forced to move into separated apartments. Mathew cut the original line-up to four and the group continued performing as an opening act for other established R&B girl groups. The girls auditioned before record labels and were finally signed to Elektra Records, moving to Atlanta Records briefly to wo"
+
+    Chunk  2 | pos [ 924:1371] | len  447 chars
+      "a Records, moving to Atlanta Records briefly to work on their first recording, only to be cut by the company. This put further strain on the family, and Beyoncé's parents separated. On October 5, 1995, Dwayne Wiggins's Grass Roots Entertainment signed the group. In 1996, the girls began recording their debut album under an agreement with Sony Music, the Knowles family reunited, and shortly after, the group got a contract with Columbia Records."
+
+
+  📦  SentenceChunker
+──────────────────────────────────────────────────────────────────────
+    Count: 4 chunks | Min: 337 | Max: 503 | Avg: 434 chars
+
+    Chunk  0 | pos [   0: 445] | len  445 chars
+      "At age eight, Beyoncé and childhood friend Kelly Rowland met LaTavia Roberson while in an audition for an all-girl entertainment group. They were placed into a group with three other girls as Girl's Tyme, and rapped and danced on the talent show circuit in Houston. After seeing the group, R&B producer Arne Frager brought them to his Northern California studio and placed them in Star Search, the largest talent show on national TV at the time."
+
+    Chunk  1 | pos [ 266: 716] | len  450 chars
+      "After seeing the group, R&B producer Arne Frager brought them to his Northern California studio and placed them in Star Search, the largest talent show on national TV at the time. Girl's Tyme failed to win, and Beyoncé later said the song they performed was not good. In 1995 Beyoncé's father resigned from his job to manage the group. The move reduced Beyoncé's family's income by half, and her parents were forced to move into separated apartments."
+
+    Chunk  2 | pos [ 602:1105] | len  503 chars
+      "The move reduced Beyoncé's family's income by half, and her parents were forced to move into separated apartments. Mathew cut the original line-up to four and the group continued performing as an opening act for other established R&B girl groups. The girls auditioned before record labels and were finally signed to Elektra Records, moving to Atlanta Records briefly to work on their first recording, only to be cut by the company. This put further strain on the family, and Beyoncé's parents separated."
+
+    Chunk  3 | pos [1034:1371] | len  337 chars
+      "This put further strain on the family, and Beyoncé's parents separated. On October 5, 1995, Dwayne Wiggins's Grass Roots Entertainment signed the group. In 1996, the girls began recording their debut album under an agreement with Sony Music, the Knowles family reunited, and shortly after, the group got a contract with Columbia Records."
+
+
+  📦  ParagraphChunker
+──────────────────────────────────────────────────────────────────────
+    Count: 4 chunks | Min: 184 | Max: 445 | Avg: 342 chars
+
+    Chunk  0 | pos [   0: 446] | len  445 chars
+      "At age eight, Beyoncé and childhood friend Kelly Rowland met LaTavia Roberson while in an audition for an all-girl entertainment group. They were placed into a group with three other girls as Girl's Tyme, and rapped and danced on the talent show circuit in Houston. After seeing the group, R&B producer Arne Frager brought them to his Northern California studio and placed them in Star Search, the largest talent show on national TV at the time."
+
+    Chunk  1 | pos [ 446: 849] | len  402 chars
+      "Girl's Tyme failed to win, and Beyoncé later said the song they performed was not good. In 1995 Beyoncé's father resigned from his job to manage the group. The move reduced Beyoncé's family's income by half, and her parents were forced to move into separated apartments. Mathew cut the original line-up to four and the group continued performing as an opening act for other established R&B girl groups."
+
+    Chunk  2 | pos [ 849:1187] | len  337 chars
+      "The girls auditioned before record labels and were finally signed to Elektra Records, moving to Atlanta Records briefly to work on their first recording, only to be cut by the company. This put further strain on the family, and Beyoncé's parents separated. On October 5, 1995, Dwayne Wiggins's Grass Roots Entertainment signed the group."
+
+    Chunk  3 | pos [1187:1371] | len  184 chars
+      "In 1996, the girls began recording their debut album under an agreement with Sony Music, the Knowles family reunited, and shortly after, the group got a contract with Columbia Records."
+
+
+  📦  RecursiveChunker
+──────────────────────────────────────────────────────────────────────
+    Count: 3 chunks | Min: 457 | Max: 504 | Avg: 487 chars
+
+    Chunk  0 | pos [   0: 457] | len  457 chars
+      "At age eight, Beyoncé and childhood friend Kelly Rowland met LaTavia Roberson while in an audition for an all-girl entertainment group. They were placed into a group with three other girls as Girl's Tyme, and rapped and danced on the talent show circuit in Houston. After seeing the group, R&B producer Arne Frager brought them to his Northern California studio and placed them in Star Search, the largest talent show on national TV at the time. Girl's Tyme"
+
+    Chunk  1 | pos [ 457: 917] | len  504 chars
+      "show on national TV at the time. Girl's Tyme failed to win, and Beyoncé later said the song they performed was not good. In 1995 Beyoncé's father resigned from his job to manage the group. The move reduced Beyoncé's family's income by half, and her parents were forced to move into separated apartments. Mathew cut the original line-up to four and the group continued performing as an opening act for other established R&B girl groups. The girls auditioned before record labels and were finally signed to"
+
+    Chunk  2 | pos [ 917:1371] | len  501 chars
+      "before record labels and were finally signed to Elektra Records, moving to Atlanta Records briefly to work on their first recording, only to be cut by the company. This put further strain on the family, and Beyoncé's parents separated. On October 5, 1995, Dwayne Wiggins's Grass Roots Entertainment signed the group. In 1996, the girls began recording their debut album under an agreement with Sony Music, the Knowles family reunited, and shortly after, the group got a contract with Columbia Records."
+
+
+──────────────────────────────────────────────────────────────────────
+  📊  SIDE-BY-SIDE STATS
+──────────────────────────────────────────────────────────────────────
+  Chunker                Chunks    Min    Max    Avg
+  ────────────────────── ────── ────── ────── ──────
+  FixedChunker                3    447    512    490
+  SentenceChunker             4    337    503    434
+  ParagraphChunker            4    184    445    342
+  RecursiveChunker            3    457    504    487
+
+
+======================================================================
+  EXAMPLE 76
+======================================================================
+  Question : Which film featured Destiny's Child's first major single?
+  Answer   : Men in Black
+  Context  : 1351 chars
+──────────────────────────────────────────────────────────────────────
+
+  📦  FixedChunker
+──────────────────────────────────────────────────────────────────────
+    Count: 3 chunks | Min: 427 | Max: 512 | Avg: 484 chars
+
+    Chunk  0 | pos [   0: 512] | len  512 chars
+      "The group changed their name to Destiny's Child in 1996, based upon a passage in the Book of Isaiah. In 1997, Destiny's Child released their major label debut song "Killing Time" on the soundtrack to the 1997 film, Men in Black. The following year, the group released their self-titled debut album, scoring their first major hit "No, No, No". The album established the group as a viable act in the music industry, with moderate sales and winning the group three Soul Train Lady of Soul Awards for Best R&B/Soul A"
+
+    Chunk  1 | pos [ 462: 974] | len  512 chars
+      "Soul Train Lady of Soul Awards for Best R&B/Soul Album of the Year, Best R&B/Soul or Rap New Artist, and Best R&B/Soul Single for "No, No, No". The group released their multi-platinum second album The Writing's on the Wall in 1999. The record features some of the group's most widely known songs such as "Bills, Bills, Bills", the group's first number-one single, "Jumpin' Jumpin'" and "Say My Name", which became their most successful song at the time, and would remain one of their signature songs. "Say My Nam"
+
+    Chunk  2 | pos [ 924:1351] | len  427 chars
+      "d remain one of their signature songs. "Say My Name" won the Best R&B Performance by a Duo or Group with Vocals and the Best R&B Song at the 43rd Annual Grammy Awards. The Writing's on the Wall sold more than eight million copies worldwide. During this time, Beyoncé recorded a duet with Marc Nelson, an original member of Boyz II Men, on the song "After All Is Said and Done" for the soundtrack to the 1999 film, The Best Man."
+
+
+  📦  SentenceChunker
+──────────────────────────────────────────────────────────────────────
+    Count: 4 chunks | Min: 342 | Max: 485 | Avg: 420 chars
+
+    Chunk  0 | pos [   0: 342] | len  342 chars
+      "The group changed their name to Destiny's Child in 1996, based upon a passage in the Book of Isaiah. In 1997, Destiny's Child released their major label debut song "Killing Time" on the soundtrack to the 1997 film, Men in Black. The following year, the group released their self-titled debut album, scoring their first major hit "No, No, No"."
+
+    Chunk  1 | pos [ 229: 693] | len  464 chars
+      "The following year, the group released their self-titled debut album, scoring their first major hit "No, No, No". The album established the group as a viable act in the music industry, with moderate sales and winning the group three Soul Train Lady of Soul Awards for Best R&B/Soul Album of the Year, Best R&B/Soul or Rap New Artist, and Best R&B/Soul Single for "No, No, No". The group released their multi-platinum second album The Writing's on the Wall in 1999."
+
+    Chunk  2 | pos [ 606:1091] | len  485 chars
+      "The group released their multi-platinum second album The Writing's on the Wall in 1999. The record features some of the group's most widely known songs such as "Bills, Bills, Bills", the group's first number-one single, "Jumpin' Jumpin'" and "Say My Name", which became their most successful song at the time, and would remain one of their signature songs. "Say My Name" won the Best R&B Performance by a Duo or Group with Vocals and the Best R&B Song at the 43rd Annual Grammy Awards."
+
+    Chunk  3 | pos [ 963:1351] | len  388 chars
+      ""Say My Name" won the Best R&B Performance by a Duo or Group with Vocals and the Best R&B Song at the 43rd Annual Grammy Awards. The Writing's on the Wall sold more than eight million copies worldwide. During this time, Beyoncé recorded a duet with Marc Nelson, an original member of Boyz II Men, on the song "After All Is Said and Done" for the soundtrack to the 1999 film, The Best Man."
+
+
+  📦  ParagraphChunker
+──────────────────────────────────────────────────────────────────────
+    Count: 4 chunks | Min: 186 | Max: 470 | Avg: 337 chars
+
+    Chunk  0 | pos [   0: 343] | len  342 chars
+      "The group changed their name to Destiny's Child in 1996, based upon a passage in the Book of Isaiah. In 1997, Destiny's Child released their major label debut song "Killing Time" on the soundtrack to the 1997 film, Men in Black. The following year, the group released their self-titled debut album, scoring their first major hit "No, No, No"."
+
+    Chunk  1 | pos [ 343: 694] | len  350 chars
+      "The album established the group as a viable act in the music industry, with moderate sales and winning the group three Soul Train Lady of Soul Awards for Best R&B/Soul Album of the Year, Best R&B/Soul or Rap New Artist, and Best R&B/Soul Single for "No, No, No". The group released their multi-platinum second album The Writing's on the Wall in 1999."
+
+    Chunk  2 | pos [ 694:1165] | len  470 chars
+      "The record features some of the group's most widely known songs such as "Bills, Bills, Bills", the group's first number-one single, "Jumpin' Jumpin'" and "Say My Name", which became their most successful song at the time, and would remain one of their signature songs. "Say My Name" won the Best R&B Performance by a Duo or Group with Vocals and the Best R&B Song at the 43rd Annual Grammy Awards. The Writing's on the Wall sold more than eight million copies worldwide."
+
+    Chunk  3 | pos [1165:1351] | len  186 chars
+      "During this time, Beyoncé recorded a duet with Marc Nelson, an original member of Boyz II Men, on the song "After All Is Said and Done" for the soundtrack to the 1999 film, The Best Man."
+
+
+  📦  RecursiveChunker
+──────────────────────────────────────────────────────────────────────
+    Count: 3 chunks | Min: 461 | Max: 505 | Avg: 480 chars
+
+    Chunk  0 | pos [   0: 461] | len  461 chars
+      "The group changed their name to Destiny's Child in 1996, based upon a passage in the Book of Isaiah. In 1997, Destiny's Child released their major label debut song "Killing Time" on the soundtrack to the 1997 film, Men in Black. The following year, the group released their self-titled debut album, scoring their first major hit "No, No, No". The album established the group as a viable act in the music industry, with moderate sales and winning the group three"
+
+    Chunk  1 | pos [ 461: 919] | len  505 chars
+      "with moderate sales and winning the group three Soul Train Lady of Soul Awards for Best R&B/Soul Album of the Year, Best R&B/Soul or Rap New Artist, and Best R&B/Soul Single for "No, No, No". The group released their multi-platinum second album The Writing's on the Wall in 1999. The record features some of the group's most widely known songs such as "Bills, Bills, Bills", the group's first number-one single, "Jumpin' Jumpin'" and "Say My Name", which became their most successful song at the time, and"
+
+    Chunk  2 | pos [ 919:1351] | len  475 chars
+      "their most successful song at the time, and would remain one of their signature songs. "Say My Name" won the Best R&B Performance by a Duo or Group with Vocals and the Best R&B Song at the 43rd Annual Grammy Awards. The Writing's on the Wall sold more than eight million copies worldwide. During this time, Beyoncé recorded a duet with Marc Nelson, an original member of Boyz II Men, on the song "After All Is Said and Done" for the soundtrack to the 1999 film, The Best Man."
+
+
+──────────────────────────────────────────────────────────────────────
+  📊  SIDE-BY-SIDE STATS
+──────────────────────────────────────────────────────────────────────
+  Chunker                Chunks    Min    Max    Avg
+  ────────────────────── ────── ────── ────── ──────
+  FixedChunker                3    427    512    484
+  SentenceChunker             4    342    485    420
+  ParagraphChunker            4    186    470    337
+  RecursiveChunker            3    461    505    480
+
+
+======================================================================
+  EXAMPLE 99
+======================================================================
+  Question : "Charlie's Angels" featured which single from the band members?
+  Answer   : Independent Women Part I
+  Context  : 1144 chars
+──────────────────────────────────────────────────────────────────────
+
+  📦  FixedChunker
+──────────────────────────────────────────────────────────────────────
+    Count: 3 chunks | Min: 220 | Max: 512 | Avg: 415 chars
+
+    Chunk  0 | pos [   0: 512] | len  512 chars
+      "The remaining band members recorded "Independent Women Part I", which appeared on the soundtrack to the 2000 film, Charlie's Angels. It became their best-charting single, topping the U.S. Billboard Hot 100 chart for eleven consecutive weeks. In early 2001, while Destiny's Child was completing their third album, Beyoncé landed a major role in the MTV made-for-television film, Carmen: A Hip Hopera, starring alongside American actor Mekhi Phifer. Set in Philadelphia, the film is a modern interpretation of the"
+
+    Chunk  1 | pos [ 462: 974] | len  512 chars
+      "lphia, the film is a modern interpretation of the 19th century opera Carmen by French composer Georges Bizet. When the third album Survivor was released in May 2001, Luckett and Roberson filed a lawsuit claiming that the songs were aimed at them. The album debuted at number one on the U.S. Billboard 200, with first-week sales of 663,000 copies sold. The album spawned other number-one hits, "Bootylicious" and the title track, "Survivor", the latter of which earned the group a Grammy Award for Best R&B Perfor"
+
+    Chunk  2 | pos [ 924:1144] | len  220 chars
+      "arned the group a Grammy Award for Best R&B Performance by a Duo or Group with Vocals. After releasing their holiday album 8 Days of Christmas in October 2001, the group announced a hiatus to further pursue solo careers."
+
+
+  📦  SentenceChunker
+──────────────────────────────────────────────────────────────────────
+    Count: 4 chunks | Min: 330 | Max: 466 | Avg: 420 chars
+
+    Chunk  0 | pos [   0: 447] | len  447 chars
+      "The remaining band members recorded "Independent Women Part I", which appeared on the soundtrack to the 2000 film, Charlie's Angels. It became their best-charting single, topping the U.S. Billboard Hot 100 chart for eleven consecutive weeks. In early 2001, while Destiny's Child was completing their third album, Beyoncé landed a major role in the MTV made-for-television film, Carmen: A Hip Hopera, starring alongside American actor Mekhi Phifer."
+
+    Chunk  1 | pos [ 242: 708] | len  466 chars
+      "In early 2001, while Destiny's Child was completing their third album, Beyoncé landed a major role in the MTV made-for-television film, Carmen: A Hip Hopera, starring alongside American actor Mekhi Phifer. Set in Philadelphia, the film is a modern interpretation of the 19th century opera Carmen by French composer Georges Bizet. When the third album Survivor was released in May 2001, Luckett and Roberson filed a lawsuit claiming that the songs were aimed at them."
+
+    Chunk  2 | pos [ 572:1010] | len  438 chars
+      "When the third album Survivor was released in May 2001, Luckett and Roberson filed a lawsuit claiming that the songs were aimed at them. The album debuted at number one on the U.S. Billboard 200, with first-week sales of 663,000 copies sold. The album spawned other number-one hits, "Bootylicious" and the title track, "Survivor", the latter of which earned the group a Grammy Award for Best R&B Performance by a Duo or Group with Vocals."
+
+    Chunk  3 | pos [ 814:1144] | len  330 chars
+      "The album spawned other number-one hits, "Bootylicious" and the title track, "Survivor", the latter of which earned the group a Grammy Award for Best R&B Performance by a Duo or Group with Vocals. After releasing their holiday album 8 Days of Christmas in October 2001, the group announced a hiatus to further pursue solo careers."
+
+
+  📦  ParagraphChunker
+──────────────────────────────────────────────────────────────────────
+    Count: 3 chunks | Min: 330 | Max: 447 | Avg: 381 chars
+
+    Chunk  0 | pos [   0: 448] | len  447 chars
+      "The remaining band members recorded "Independent Women Part I", which appeared on the soundtrack to the 2000 film, Charlie's Angels. It became their best-charting single, topping the U.S. Billboard Hot 100 chart for eleven consecutive weeks. In early 2001, while Destiny's Child was completing their third album, Beyoncé landed a major role in the MTV made-for-television film, Carmen: A Hip Hopera, starring alongside American actor Mekhi Phifer."
+
+    Chunk  1 | pos [ 448: 814] | len  365 chars
+      "Set in Philadelphia, the film is a modern interpretation of the 19th century opera Carmen by French composer Georges Bizet. When the third album Survivor was released in May 2001, Luckett and Roberson filed a lawsuit claiming that the songs were aimed at them. The album debuted at number one on the U.S. Billboard 200, with first-week sales of 663,000 copies sold."
+
+    Chunk  2 | pos [ 814:1144] | len  330 chars
+      "The album spawned other number-one hits, "Bootylicious" and the title track, "Survivor", the latter of which earned the group a Grammy Award for Best R&B Performance by a Duo or Group with Vocals. After releasing their holiday album 8 Days of Christmas in October 2001, the group announced a hiatus to further pursue solo careers."
+
+
+  📦  RecursiveChunker
+──────────────────────────────────────────────────────────────────────
+    Count: 3 chunks | Min: 274 | Max: 507 | Avg: 412 chars
+
+    Chunk  0 | pos [   0: 454] | len  454 chars
+      "The remaining band members recorded "Independent Women Part I", which appeared on the soundtrack to the 2000 film, Charlie's Angels. It became their best-charting single, topping the U.S. Billboard Hot 100 chart for eleven consecutive weeks. In early 2001, while Destiny's Child was completing their third album, Beyoncé landed a major role in the MTV made-for-television film, Carmen: A Hip Hopera, starring alongside American actor Mekhi Phifer. Set in"
+
+    Chunk  1 | pos [ 454: 916] | len  507 chars
+      "alongside American actor Mekhi Phifer. Set in Philadelphia, the film is a modern interpretation of the 19th century opera Carmen by French composer Georges Bizet. When the third album Survivor was released in May 2001, Luckett and Roberson filed a lawsuit claiming that the songs were aimed at them. The album debuted at number one on the U.S. Billboard 200, with first-week sales of 663,000 copies sold. The album spawned other number-one hits, "Bootylicious" and the title track, "Survivor", the latter of"
+
+    Chunk  2 | pos [ 916:1144] | len  274 chars
+      "and the title track, "Survivor", the latter of which earned the group a Grammy Award for Best R&B Performance by a Duo or Group with Vocals. After releasing their holiday album 8 Days of Christmas in October 2001, the group announced a hiatus to further pursue solo careers."
+
+
+──────────────────────────────────────────────────────────────────────
+  📊  SIDE-BY-SIDE STATS
+──────────────────────────────────────────────────────────────────────
+  Chunker                Chunks    Min    Max    Avg
+  ────────────────────── ────── ────── ────── ──────
+  FixedChunker                3    220    512    415
+  SentenceChunker             4    330    466    420
+  ParagraphChunker            3    330    447    381
+  RecursiveChunker            3    274    507    412
+(myenv) daniyal@192 adaptive-chunking-rag % 
