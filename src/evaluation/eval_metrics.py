@@ -9,40 +9,37 @@ across every valid example in the dataset and computes:
     Hit Rate @ K = 1, 3, 5
     MRR (Mean Reciprocal Rank)
 
-PERFORMANCE ARCHITECTURE
-─────────────────────────
-On a low-clock dual-core CPU (e.g. 1.1 GHz i3) the only thing that
-moves wall time is the number of model forward passes.  Everything
-else — FAISS search on 3-4 vectors, dict lookups, list appends — is
-sub-millisecond.  The script is structured around this fact.
+ARCHITECTURE — WHY SUBPROCESSES
+────────────────────────────────
+PyTorch's CPU memory allocator (c10::Allocator) requests pages from
+the OS via mmap and never returns them, even after tensors are freed.
+On macOS there is no API to force a release.  In a single long-lived
+process the mapped address space grows monotonically across every
+encode() call until the OS OOM-killer steps in.
 
-The pipeline runs in three distinct phases:
+The fix: Phase B (all model inference) runs as a sequence of
+short-lived subprocesses.  Each one loads the model, encodes one
+batch of texts, writes the vectors to disk as .npy, and exits.
+On exit the OS reclaims every page.  The next subprocess starts
+with a clean address space.
 
-    Phase A — CHUNK (CPU-bound text ops, no model calls)
-        For every unique context in the dataset, run all 4 chunkers.
-        Collect the raw chunk texts grouped by chunker.  No encoding
-        happens here.  This phase is fast (< 1 second total).
+The main process (this file) never imports sentence-transformers or
+torch.  It does Phase A (chunking — pure text), orchestrates Phase B
+(spawning workers), and runs Phase C (FAISS search + metrics — numpy
+only).  Its peak memory is ~200 MB regardless of dataset size.
 
-    Phase B — EMBED (all model forward passes live here)
-        For each chunker, take every chunk text produced in Phase A
-        and encode them in a single batch call.  sentence-transformers
-        internally splits this into mini-batches of batch_size and
-        runs one forward pass per mini-batch.  Concentrating all texts
-        into one call means the tokenizer and forward pass run at
-        maximum throughput.  This replaces ~1200 tiny encode() calls
-        (one per cache miss in the old code) with 4 large ones.
+PHASES
+──────
+    Phase A — CHUNK   : chunk all unique contexts.  Text ops only.
+    Phase B — ENCODE  : spawn one subprocess per encode job.
+                        Jobs: questions, FixedChunker, SentenceChunker,
+                              ParagraphChunker, RecursiveChunker.
+                        Each subprocess: load model → encode → write .npy → exit.
+    Phase C — SEARCH  : load vectors from .npy, build FAISS indexes,
+                        run eval loop.  Zero model calls.
 
-        Question vectors are also batch-encoded here — one call for
-        all ~1000 questions.
-
-    Phase C — SEARCH (zero model calls, everything pre-computed)
-        The eval loop.  Every context is already chunked, embedded,
-        and indexed.  Every question is already embedded.  Each
-        iteration is: dict lookup → FAISS search on 3-4 vectors →
-        substring check.  Sub-millisecond per chunker per example.
-
-DESIGN DECISIONS (unchanged from original)
-───────────────────────────────────────────
+DESIGN DECISIONS (unchanged)
+─────────────────────────────
   • Answer filter: drop examples with answers < MIN_ANSWER_LENGTH chars.
   • Search depth: one search(k=5) call. All Hit@K derived from it.
   • Ranks are 0-indexed. hit@K checks hit_rank < K.
@@ -63,6 +60,7 @@ OUTPUT:
 import json
 import sys
 import os
+import subprocess
 import time
 from typing import List, Dict, Optional, Tuple
 from collections import defaultdict
@@ -70,24 +68,35 @@ from collections import defaultdict
 import numpy as np
 
 # ─── Importable from project root ────────────────────────────────────────────
-# Add src directory to sys.path so we can import chunkers and embeddings
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# NOTE: we do NOT import EmbeddingModel or sentence-transformers here.
+# That's the whole point.  Only the subprocess (encode_worker.py) does.
 from chunkers import FixedChunker, SentenceChunker, ParagraphChunker, RecursiveChunker
-from embeddings.embedding_model import EmbeddingModel
 from embeddings.faiss_index import FaissIndex
 
 
 # ─── Config ──────────────────────────────────────────────────────────────────
-DATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'data', 'train_1000.json')
+DATA_PATH = "data/train_1000.json"
 
-K_MAX    = 5                # Single search depth. All Hit@K derived from it.
-K_VALUES = [1, 3, 5]        # Which K values to report.
-MIN_ANSWER_LENGTH = 4       # Answers shorter than this are filtered out.
-OUTPUT_DIR = "results"      # Where to write results JSON.
+K_MAX    = 5
+K_VALUES = [1, 3, 5]
+MIN_ANSWER_LENGTH = 4
+OUTPUT_DIR = "results"
+
+# Temp directory for Phase B I/O between main process and workers.
+# Created at the start, cleaned up at the end.
+ENCODE_TMP_DIR = "results/_encode_tmp"
+
+# The worker script, relative to this file.
+WORKER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "encode_worker.py")
+
+# EmbeddingModel.DIMENSION — hardcoded here so we don't have to import it.
+# If the model changes, update this too.
+EMBEDDING_DIMENSION = 384
 
 
-# ─── Chunker configs — identical to test_retrieval.py ───────────────────────
+# ─── Chunker configs ─────────────────────────────────────────────────────────
 CHUNKERS: Dict[str, object] = {
     "FixedChunker":     FixedChunker(chunk_size=512, overlap=50),
     "SentenceChunker":  SentenceChunker(max_chars=512, overlap_sentences=1),
@@ -98,15 +107,7 @@ CHUNKERS: Dict[str, object] = {
 
 # ─── Data loading ────────────────────────────────────────────────────────────
 def load_and_filter(path: str, min_answer_len: int) -> Tuple[List[dict], Dict[str, int]]:
-    """Load examples and drop those whose answers are too short to eval safely.
-
-    Args:
-        path: Path to JSON dataset (SQuAD format with top-level "examples" key).
-        min_answer_len: Minimum character length for an answer to be included.
-
-    Returns:
-        Tuple of (valid_examples, drop_counts).
-    """
+    """Load examples and drop those whose answers are too short."""
     with open(path, "r") as f:
         data = json.load(f)
 
@@ -116,15 +117,12 @@ def load_and_filter(path: str, min_answer_len: int) -> Tuple[List[dict], Dict[st
 
     for ex in all_examples:
         answer = ex.get("answer", "")
-
         if not answer or not answer.strip():
             drop_counts["empty answer"] += 1
             continue
-
         if len(answer.strip()) < min_answer_len:
             drop_counts[f"answer < {min_answer_len} chars"] += 1
             continue
-
         valid.append(ex)
 
     return valid, dict(drop_counts)
@@ -134,19 +132,11 @@ def load_and_filter(path: str, min_answer_len: int) -> Tuple[List[dict], Dict[st
 def chunk_all_contexts(
     examples: List[dict],
 ) -> Dict[str, Dict[str, list]]:
-    """Run every chunker on every unique context. No encoding here.
-
-    Groups examples by context first so each unique context is chunked
-    exactly once per chunker.  Chunking is cheap (text splitting); this
-    phase exists to separate it cleanly from the expensive encode phase.
-
-    Args:
-        examples: Filtered example list.
+    """Run every chunker on every unique context.  No encoding.
 
     Returns:
-        Nested dict:  { chunker_name: { context_text: [Chunk, ...] } }
+        { chunker_name: { context_text: [Chunk, ...] } }
     """
-    # Collect unique contexts (preserve order for determinism)
     seen: Dict[str, bool] = {}
     unique_contexts: List[str] = []
     for ex in examples:
@@ -156,11 +146,9 @@ def chunk_all_contexts(
             unique_contexts.append(ctx)
 
     chunked: Dict[str, Dict[str, list]] = {}
-
     for chunker_name, chunker in CHUNKERS.items():
         context_chunks: Dict[str, list] = {}
         for ctx in unique_contexts:
-            # doc_id is keyed on context content so it's stable across questions
             doc_id = f"ctx_{hash(ctx) % (10**8)}"
             chunks = chunker.chunk(ctx, document_id=doc_id)
             if chunks:
@@ -170,108 +158,176 @@ def chunk_all_contexts(
     return chunked
 
 
-# ─── Phase B: batch-encode everything ────────────────────────────────────────
-def encode_all(
+# ─── Phase B: spawn workers ─────────────────────────────────────────────────
+def write_texts_json(texts: List[str], path: str) -> None:
+    """Write a list of texts to a JSON file for the worker to read."""
+    with open(path, "w") as f:
+        json.dump({"texts": texts}, f)
+
+
+def run_encode_worker(job_name: str, input_json: str, output_npy: str) -> None:
+    """Spawn encode_worker.py as a subprocess and wait for it to finish.
+
+    The subprocess loads the model, encodes, writes .npy, and exits.
+    All of PyTorch's memory is reclaimed by the OS on exit.
+
+    Args:
+        job_name: Label for progress output (e.g. "questions", "FixedChunker").
+        input_json: Path to the JSON file with texts.
+        output_npy: Path where the worker will write the .npy output.
+
+    Raises:
+        RuntimeError: If the subprocess exits with non-zero status.
+    """
+    cmd = [sys.executable, WORKER_SCRIPT, job_name, input_json, output_npy]
+    print(f"  Spawning worker: {job_name}...")
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    # Always print worker stdout so progress is visible
+    if result.stdout:
+        for line in result.stdout.strip().split("\n"):
+            print(f"    {line}")
+
+    if result.returncode != 0:
+        print(f"    STDERR: {result.stderr}", flush=True)
+        raise RuntimeError(
+            f"encode_worker failed for {job_name} "
+            f"(exit code {result.returncode})"
+        )
+
+
+def phase_b_encode(
     examples: List[dict],
     chunked: Dict[str, Dict[str, list]],
-    embed_model: EmbeddingModel,
 ) -> Tuple[
     Dict[int, np.ndarray],                                          # question vectors
-    Dict[str, Dict[str, Tuple[list, "FaissIndex", Dict[str, object]]]]  # per-chunker indexed cache
+    Dict[str, np.ndarray],                                          # chunker name → flat vectors
+    Dict[str, List[Tuple[str, int, int]]],                          # chunker name → boundaries
 ]:
-    """Batch-encode questions and all chunk texts, build FAISS indexes.
+    """Write texts to disk, spawn workers, read vectors back.
 
-    This is where every model forward pass in the entire script lives.
-    Two batch encode() calls: one for all questions, one per chunker
-    for all chunk texts.  sentence-transformers handles the internal
-    mini-batching.
+    No model is loaded in this process.  Each worker loads its own
+    copy of the model, uses it, and exits.
 
     Args:
         examples: Filtered example list (for questions).
         chunked: Output of chunk_all_contexts().
-        embed_model: Shared EmbeddingModel instance.
 
     Returns:
-        question_vectors: { example_index: (384,) float32 array }
-        indexed_cache:    { chunker_name: { context: (chunks, FaissIndex, chunk_map) } }
+        question_vectors: { index: (384,) float32 }
+        chunker_vectors:  { chunker_name: (M, 384) float32 }
+        chunker_boundaries: { chunker_name: [(context, start, end), ...] }
+                            (needed to slice vectors back into per-context groups)
     """
-    # ── Questions: one batch call ────────────────────────────────────────────
-    print("  Encoding questions...")
-    questions = [ex["question"] for ex in examples]
-    q_matrix  = embed_model.encode(questions)                        # (N, 384)
+    os.makedirs(ENCODE_TMP_DIR, exist_ok=True)
+
+    # ── Questions ────────────────────────────────────────────────────────────
+    questions      = [ex["question"] for ex in examples]
+    q_input_path   = os.path.join(ENCODE_TMP_DIR, "questions_input.json")
+    q_output_path  = os.path.join(ENCODE_TMP_DIR, "questions.npy")
+
+    write_texts_json(questions, q_input_path)
+    run_encode_worker("questions", q_input_path, q_output_path)
+
+    q_matrix = np.load(q_output_path)                                # (N, 384)
     question_vectors: Dict[int, np.ndarray] = {
         i: q_matrix[i] for i in range(len(questions))
     }
-    print(f"    {len(question_vectors)} question vectors.")
+    del q_matrix   # rows are views but that's fine — q_matrix is small
 
-    # ── Chunks: one batch call per chunker ───────────────────────────────────
-    indexed_cache: Dict[str, Dict[str, Tuple[list, FaissIndex, dict]]] = {}
+    # ── Chunks: one worker per chunker ───────────────────────────────────────
+    chunker_vectors:    Dict[str, np.ndarray]                    = {}
+    chunker_boundaries: Dict[str, List[Tuple[str, int, int]]]   = {}
 
     for chunker_name, context_chunks in chunked.items():
-        print(f"  Encoding chunks for {chunker_name}...")
-
         if not context_chunks:
-            indexed_cache[chunker_name] = {}
+            chunker_vectors[chunker_name]    = np.empty((0, EMBEDDING_DIMENSION), dtype=np.float32)
+            chunker_boundaries[chunker_name] = []
             continue
 
-        # Flatten: collect all chunk texts in order, track boundaries.
-        # boundaries[i] = (context, start_index, end_index) into the flat list.
-        contexts_ordered: List[str]   = []
-        flat_texts:       List[str]   = []
-        boundaries:       List[Tuple[str, int, int]] = []
+        # Flatten chunk texts, track boundaries (same logic as before)
+        flat_texts: List[str]               = []
+        boundaries: List[Tuple[str, int, int]] = []
 
         for ctx, chunks in context_chunks.items():
             start = len(flat_texts)
             flat_texts.extend(c.text for c in chunks)
             end = len(flat_texts)
-            contexts_ordered.append(ctx)
             boundaries.append((ctx, start, end))
 
-        # ONE encode call for all chunk texts of this chunker.
-        all_vectors = embed_model.encode(flat_texts)                 # (M, 384)
+        # Write texts, spawn worker, read vectors back
+        input_path  = os.path.join(ENCODE_TMP_DIR, f"{chunker_name}_input.json")
+        output_path = os.path.join(ENCODE_TMP_DIR, f"{chunker_name}.npy")
 
-        # Split vectors back into per-context groups, build index per context.
+        write_texts_json(flat_texts, input_path)
+        run_encode_worker(chunker_name, input_path, output_path)
+
+        chunker_vectors[chunker_name]    = np.load(output_path)      # (M, 384)
+        chunker_boundaries[chunker_name] = boundaries
+
+    return question_vectors, chunker_vectors, chunker_boundaries
+
+
+def cleanup_encode_tmp() -> None:
+    """Remove the temp directory and all files in it."""
+    import shutil
+    if os.path.exists(ENCODE_TMP_DIR):
+        shutil.rmtree(ENCODE_TMP_DIR)
+
+
+# ─── Phase C: build indexes and search ──────────────────────────────────────
+def build_indexed_cache(
+    chunked:            Dict[str, Dict[str, list]],
+    chunker_vectors:    Dict[str, np.ndarray],
+    chunker_boundaries: Dict[str, List[Tuple[str, int, int]]],
+) -> Dict[str, Dict[str, Tuple[list, "FaissIndex", dict]]]:
+    """Build FAISS indexes from the vectors loaded off disk.
+
+    This runs in the main process.  No model, no PyTorch.  Just numpy
+    slicing and FAISS index construction.
+
+    Args:
+        chunked: The Chunk objects from Phase A (needed for chunk_ids and text).
+        chunker_vectors: The encoded vectors from Phase B.
+        chunker_boundaries: The (context, start, end) slicing info from Phase B.
+
+    Returns:
+        { chunker_name: { context: (chunks, FaissIndex, chunk_map) } }
+    """
+    indexed_cache: Dict[str, Dict[str, Tuple[list, FaissIndex, dict]]] = {}
+
+    for chunker_name in CHUNKERS:
+        all_vectors = chunker_vectors[chunker_name]
+        boundaries  = chunker_boundaries[chunker_name]
+        context_chunks = chunked[chunker_name]
+
         chunker_cache: Dict[str, Tuple[list, FaissIndex, dict]] = {}
 
         for ctx, start, end in boundaries:
-            chunks      = context_chunks[ctx]
-            vectors     = all_vectors[start:end]                     # (n_chunks, 384)
-            chunk_ids   = [c.chunk_id for c in chunks]
+            chunks    = context_chunks[ctx]
+            vectors   = all_vectors[start:end].copy()
+            chunk_ids = [c.chunk_id for c in chunks]
 
-            index = FaissIndex(dimension=EmbeddingModel.DIMENSION)
+            index = FaissIndex(dimension=EMBEDDING_DIMENSION)
             index.add(vectors, chunk_ids)
 
-            # Build chunk_map once, cache it — not on every search call.
             chunk_map = {c.chunk_id: c for c in chunks}
-
             chunker_cache[ctx] = (chunks, index, chunk_map)
 
         indexed_cache[chunker_name] = chunker_cache
-        print(f"    {len(flat_texts)} chunk texts → {len(boundaries)} indexes.")
 
-    return question_vectors, indexed_cache
+    return indexed_cache
 
 
-# ─── Phase C: eval loop (zero encode calls) ─────────────────────────────────
 def search_cached(
-    indexed_cache: Dict[str, Dict[str, Tuple[list, FaissIndex, dict]]],
+    indexed_cache: Dict[str, Dict[str, Tuple[list, "FaissIndex", dict]]],
     chunker_name: str,
     context: str,
     query_vector: np.ndarray,
     k: int,
 ) -> List[dict]:
-    """Search a pre-built index. No encoding, no chunking, no cache miss path.
-
-    Args:
-        indexed_cache: Output of encode_all().
-        chunker_name: Which chunker's index to search.
-        context: The context text (used as key into the cache).
-        query_vector: Pre-computed question vector.
-        k: Number of results.
-
-    Returns:
-        List of dicts: rank, score, text.  Empty if context not indexed.
-    """
+    """Search a pre-built index.  Zero model calls."""
     entry = indexed_cache[chunker_name].get(context)
     if entry is None:
         return []
@@ -287,15 +343,7 @@ def search_cached(
 
 # ─── Metrics ─────────────────────────────────────────────────────────────────
 def compute_hit_rank(results: List[dict], answer: str) -> Optional[int]:
-    """Find the rank of the first result whose text contains the answer.
-
-    Args:
-        results: Search results sorted by rank ascending.
-        answer: Ground-truth answer string.
-
-    Returns:
-        0-indexed rank of first hit, or None if answer not found.
-    """
+    """First rank whose text contains the answer, or None."""
     answer_lower = answer.lower()
     for r in results:
         if answer_lower in r["text"].lower():
@@ -304,15 +352,7 @@ def compute_hit_rank(results: List[dict], answer: str) -> Optional[int]:
 
 
 def derive_metrics(hit_rank: Optional[int], k_values: List[int]) -> dict:
-    """Derive all metrics from a single hit_rank value.
-
-    Args:
-        hit_rank: 0-indexed rank of first hit, or None.
-        k_values: List of K values to compute Hit Rate for.
-
-    Returns:
-        Dict: {"hit@1": 0|1, "hit@3": 0|1, "hit@5": 0|1, "rr": float}
-    """
+    """Derive Hit@K and RR from a single hit_rank."""
     metrics: dict = {}
     for k in k_values:
         metrics[f"hit@{k}"] = 1 if (hit_rank is not None and hit_rank < k) else 0
@@ -322,30 +362,18 @@ def derive_metrics(hit_rank: Optional[int], k_values: List[int]) -> dict:
 
 # ─── Progress display ────────────────────────────────────────────────────────
 def print_progress(current: int, total: int, start_time: float) -> None:
-    """Overwrite-in-place progress bar.
-
-    Args:
-        current: Examples processed so far.
-        total: Total examples.
-        start_time: time.time() when the run started.
-    """
     pct = current / total
     bar_width = 28
     filled = int(bar_width * pct)
     bar = "█" * filled + "░" * (bar_width - filled)
 
     elapsed = time.time() - start_time
-    if current > 0:
-        eta_seconds = int((elapsed / current) * (total - current))
-        eta_str = f"{eta_seconds}s"
-    else:
-        eta_str = "—"
+    eta_str = f"{int((elapsed / current) * (total - current))}s" if current > 0 else "—"
 
     print(
         f"\r  [{current:>4}/{total}]  {bar}  {pct * 100:5.1f}%  "
         f"elapsed {int(elapsed):>4}s  ETA {eta_str:<6}",
-        end="",
-        flush=True,
+        end="", flush=True,
     )
 
 
@@ -356,14 +384,6 @@ def print_results_table(
     num_unique_contexts: int,
     elapsed: float,
 ) -> None:
-    """Print the final comparison table, sorted by MRR descending.
-
-    Args:
-        aggregated: {chunker_name: {"hit@1": float, ..., "rr": float}}
-        num_examples: Number of examples evaluated.
-        num_unique_contexts: Number of unique contexts in the dataset.
-        elapsed: Total wall-clock seconds.
-    """
     print("\n" + "=" * 68)
     print("  📊  PHASE 4 RESULTS — Chunker Comparison")
     print("=" * 68)
@@ -374,12 +394,10 @@ def print_results_table(
     print(f"  Wall-clock time     : {elapsed:.1f}s")
     print()
 
-    # Header
     k_header = "".join(f"{'Hit@' + str(k):>9}" for k in K_VALUES)
     print(f"  {'Chunker':<22} {k_header} {'MRR':>9}")
     print(f"  {'─' * 22} " + " ────────" * len(K_VALUES) + " ────────")
 
-    # Rows sorted by MRR descending
     for name, agg in sorted(aggregated.items(), key=lambda x: x[1]["rr"], reverse=True):
         k_vals = "".join(f"{agg[f'hit@{k}']:>9.4f}" for k in K_VALUES)
         print(f"  {name:<22} {k_vals} {agg['rr']:>9.4f}")
@@ -389,6 +407,8 @@ def print_results_table(
 
 # ─── Main ────────────────────────────────────────────────────────────────────
 def main() -> None:
+    total_start = time.time()
+
     # ── 1. Load & filter ─────────────────────────────────────────────────────
     print("\n⏳  Loading and filtering dataset...")
     examples, drop_counts = load_and_filter(DATA_PATH, MIN_ANSWER_LENGTH)
@@ -401,35 +421,47 @@ def main() -> None:
         print("❌  No valid examples after filtering. Check DATA_PATH.")
         return
 
-    # ── 2. Init embedding model ─────────────────────────────────────────────
-    print("\n⏳  Loading embedding model (downloads on first use if needed)...")
-    embed_model = EmbeddingModel()
+    num_unique = len(set(ex["context"] for ex in examples))
 
-    # ── 3. Phase A: chunk all unique contexts (no model calls) ──────────────
+    # ── 2. Phase A: chunk ────────────────────────────────────────────────────
     print("\n⏳  Phase A — chunking all unique contexts...")
     chunked = chunk_all_contexts(examples)
+    print(f"  {num_unique} unique contexts × {len(CHUNKERS)} chunkers.")
 
-    num_unique = len(set(ex["context"] for ex in examples))
-    print(f"  {num_unique} unique contexts chunked across {len(CHUNKERS)} chunkers.")
+    # ── 3. Phase B: encode via subprocesses ──────────────────────────────────
+    print("\n⏳  Phase B — encoding (each job is a separate subprocess)...")
+    print(f"  Each subprocess loads the model, encodes, writes .npy, and exits.")
+    print(f"  PyTorch memory is fully reclaimed between jobs.\n")
 
-    # ── 4. Phase B: batch-encode everything (all forward passes) ────────────
-    print("\n⏳  Phase B — batch encoding (all model inference runs here)...")
-    question_vectors, indexed_cache = encode_all(examples, chunked, embed_model)
+    question_vectors, chunker_vectors, chunker_boundaries = phase_b_encode(
+        examples, chunked
+    )
 
-    # ── 5. Phase C: eval loop (zero model calls) ───────────────────────────
+    # ── 4. Build FAISS indexes (main process, no model) ─────────────────────
+    print("\n⏳  Building FAISS indexes...")
+    indexed_cache = build_indexed_cache(chunked, chunker_vectors, chunker_boundaries)
+
+    # Release the flat vector arrays — they've been sliced+copied into indexes
+    del chunker_vectors, chunker_boundaries
+
+    # Clean up temp files
+    cleanup_encode_tmp()
+    print("  Done. Temp files cleaned up.")
+
+    # ── 5. Phase C: eval loop ────────────────────────────────────────────────
     total = len(examples)
     print(f"\n⏳  Phase C — evaluating {total} examples × {len(CHUNKERS)} chunkers...")
-    print(f"    (all indexes pre-built, zero encode calls in this loop)\n")
+    print(f"    (all indexes pre-built, zero encode calls)\n")
 
     per_example_hit_ranks: Dict[str, List[Optional[int]]] = {
         name: [] for name in CHUNKERS
     }
 
-    start_time = time.time()
+    loop_start = time.time()
 
     for i, example in enumerate(examples):
-        context = example["context"]
-        answer  = example["answer"]
+        context      = example["context"]
+        answer       = example["answer"]
         query_vector = question_vectors[i]
 
         for chunker_name in CHUNKERS:
@@ -438,14 +470,12 @@ def main() -> None:
             per_example_hit_ranks[chunker_name].append(hit_rank)
 
         if (i + 1) % 50 == 0 or (i + 1) == total:
-            print_progress(i + 1, total, start_time)
+            print_progress(i + 1, total, loop_start)
 
-    elapsed = time.time() - start_time
     print("\n")
 
     # ── 6. Aggregate ────────────────────────────────────────────────────────
     aggregated: Dict[str, dict] = {}
-
     for chunker_name, hit_ranks in per_example_hit_ranks.items():
         all_metrics = [derive_metrics(hr, K_VALUES) for hr in hit_ranks]
         agg: dict = {}
@@ -453,23 +483,24 @@ def main() -> None:
             agg[key] = sum(m[key] for m in all_metrics) / len(all_metrics)
         aggregated[chunker_name] = agg
 
-    # ── 7. Print table ──────────────────────────────────────────────────────
-    print_results_table(aggregated, total, num_unique, elapsed)
+    # ── 7. Print + save ─────────────────────────────────────────────────────
+    total_elapsed = time.time() - total_start
+    print_results_table(aggregated, total, num_unique, total_elapsed)
 
-    # ── 8. Save to JSON ─────────────────────────────────────────────────────
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     output_path = os.path.join(OUTPUT_DIR, "eval_metrics.json")
 
     save_payload = {
         "config": {
-            "data_path":         DATA_PATH,
-            "num_examples":      total,
+            "data_path":           DATA_PATH,
+            "num_examples":        total,
             "num_unique_contexts": num_unique,
-            "k_max":             K_MAX,
-            "k_values":          K_VALUES,
-            "min_answer_length": MIN_ANSWER_LENGTH,
-            "chunkers":          {name: repr(c) for name, c in CHUNKERS.items()},
-            "elapsed_seconds":   round(elapsed, 2),
+            "k_max":               K_MAX,
+            "k_values":            K_VALUES,
+            "min_answer_length":   MIN_ANSWER_LENGTH,
+            "chunkers":            {name: repr(c) for name, c in CHUNKERS.items()},
+            "elapsed_seconds":     round(total_elapsed, 2),
+            "encoding_method":     "subprocess-per-job",
         },
         "aggregated": aggregated,
         "per_example_hit_ranks": per_example_hit_ranks,
