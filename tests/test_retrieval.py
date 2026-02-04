@@ -38,7 +38,7 @@ from embeddings.faiss_index import FaissIndex
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 DATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'train_100.json')
-
+#DATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'natural_questions_squad_100.json')
 # These are the 3 unique contexts picked by find_best_contexts.py
 # Update these if you ran find_best_contexts on a different dataset
 EXAMPLE_INDICES = [63, 76, 99]
