@@ -74,18 +74,21 @@ import numpy as np
 src_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
 sys.path.insert(0, os.path.join(src_path, 'src'))
 
-from chunkers import FixedChunker, SentenceChunker, ParagraphChunker, RecursiveChunker
+from chunkers import FixedChunker, SentenceChunker, ParagraphChunker, RecursiveChunker, StructureAwareChunker, SemanticDensityChunker
 from embeddings.embedding_model import EmbeddingModel
 from embeddings.faiss_index import FaissIndex
+from utils.text_preprocessor import preprocess_context, detect_html_content
 
 
 # ─── Config ──────────────────────────────────────────────────────────────────
-DATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'data', 'train_1000.json')
-
+#DATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'data', 'train_1000.json')
+DATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'data', 'natural_questions_squad_1000.json')
+#DATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'data', 'train_1000.json')
 K_MAX    = 5                # Single search depth. All Hit@K derived from it.
 K_VALUES = [1, 3, 5]        # Which K values to report.
 MIN_ANSWER_LENGTH = 4       # Answers shorter than this are filtered out.
 OUTPUT_DIR = "results"      # Where to write results JSON.
+PREPROCESS_HTML = True      # Preprocess HTML content (for Wikipedia/NQ data)
 
 
 # ─── Chunker configs — identical to test_retrieval.py ───────────────────────
@@ -93,20 +96,31 @@ CHUNKERS: Dict[str, object] = {
     #"FixedChunker":     FixedChunker(chunk_size=512, overlap=50),
     #"SentenceChunker":  SentenceChunker(max_chars=512, overlap_sentences=1),
     #"ParagraphChunker": ParagraphChunker(max_chars=512, min_chars=100),
-    #"RecursiveChunker": RecursiveChunker(max_chars=512, overlap=50),
+    ##"RecursiveChunker": RecursiveChunker(max_chars=512, overlap=50),
     "FixedChunker": FixedChunker(chunk_size=1024, overlap=50),
     "RecursiveChunker": RecursiveChunker(max_chars=1024, overlap=50),
     "ParagraphChunker": ParagraphChunker(max_chars=1024, min_chars=200),
+    "SemanticDensityChunker": SemanticDensityChunker(
+        chunk_size=1024,
+        min_overlap=50,
+        max_overlap=50,
+        density_window=300
+    ),
+    "StructureAwareChunker": StructureAwareChunker(
+        chunk_size=1024,
+        min_chunk_size=200,  # Lowered from 512 to preserve small sections
+        overlap=50
+    ),
 }
 
-
 # ─── Data loading ────────────────────────────────────────────────────────────
-def load_and_filter(path: str, min_answer_len: int) -> Tuple[List[dict], Dict[str, int]]:
+def load_and_filter(path: str, min_answer_len: int, preprocess_html: bool = True) -> Tuple[List[dict], Dict[str, int]]:
     """Load examples and drop those whose answers are too short to eval safely.
 
     Args:
         path: Path to JSON dataset (SQuAD format with top-level "examples" key).
         min_answer_len: Minimum character length for an answer to be included.
+        preprocess_html: Whether to preprocess HTML content in contexts.
 
     Returns:
         Tuple of (valid_examples, drop_counts).
@@ -117,6 +131,7 @@ def load_and_filter(path: str, min_answer_len: int) -> Tuple[List[dict], Dict[st
     all_examples = data["examples"]
     valid: List[dict] = []
     drop_counts: Dict[str, int] = defaultdict(int)
+    html_contexts_found = 0
 
     for ex in all_examples:
         answer = ex.get("answer", "")
@@ -129,7 +144,18 @@ def load_and_filter(path: str, min_answer_len: int) -> Tuple[List[dict], Dict[st
             drop_counts[f"answer < {min_answer_len} chars"] += 1
             continue
 
+        # Preprocess HTML content if enabled
+        if preprocess_html:
+            original_context = ex.get("context", "")
+            if detect_html_content(original_context):
+                html_contexts_found += 1
+                ex = ex.copy()  # Don't modify original
+                ex["context"] = preprocess_context(original_context)
+
         valid.append(ex)
+
+    if html_contexts_found > 0:
+        print(f"  → Preprocessed {html_contexts_found} HTML contexts")
 
     return valid, dict(drop_counts)
 
@@ -395,7 +421,8 @@ def print_results_table(
 def main() -> None:
     # ── 1. Load & filter ─────────────────────────────────────────────────────
     print("\n⏳  Loading and filtering dataset...")
-    examples, drop_counts = load_and_filter(DATA_PATH, MIN_ANSWER_LENGTH)
+    print(f"  HTML preprocessing: {'enabled' if PREPROCESS_HTML else 'disabled'}")
+    examples, drop_counts = load_and_filter(DATA_PATH, MIN_ANSWER_LENGTH, PREPROCESS_HTML)
 
     print(f"  Valid examples : {len(examples)}")
     for reason, count in drop_counts.items():
@@ -412,6 +439,81 @@ def main() -> None:
     # ── 3. Phase A: chunk all unique contexts (no model calls) ──────────────
     print("\n⏳  Phase A — chunking all unique contexts...")
     chunked = chunk_all_contexts(examples)
+    # ── Chunk size statistics (post-Phase A) ───────────────────────────────
+    for chunker_name, context_chunks in chunked.items():
+        chunk_sizes = [
+            len(chunk.text)
+            for chunks in context_chunks.values()
+            for chunk in chunks
+        ]
+
+        if not chunk_sizes:
+            print(f"  {chunker_name}: no chunks produced")
+            continue
+
+        chunk_sizes_sorted = sorted(chunk_sizes)
+        n = len(chunk_sizes_sorted)
+        avg = sum(chunk_sizes_sorted) / n
+        median = chunk_sizes_sorted[n // 2]
+        std = float(np.std(chunk_sizes_sorted))
+        p10 = chunk_sizes_sorted[int(n * 0.10)]
+        p90 = chunk_sizes_sorted[int(n * 0.90)]
+
+        # Chunks per context
+        chunks_per_context = [len(chunks) for chunks in context_chunks.values()]
+        avg_chunks_per_context = sum(chunks_per_context) / len(chunks_per_context)
+        min_chunks_per_context = min(chunks_per_context)
+        max_chunks_per_context = max(chunks_per_context)
+
+        print(f"  {chunker_name} chunk size stats:")
+        print(f"    min      : {chunk_sizes_sorted[0]}")
+        print(f"    max      : {chunk_sizes_sorted[-1]}")
+        print(f"    avg      : {avg:.1f}")
+        print(f"    median   : {median}")
+        print(f"    std      : {std:.1f}")
+        print(f"    p10      : {p10}")
+        print(f"    p90      : {p90}")
+        print(f"    total    : {n}")
+        print(f"    contexts : {len(context_chunks)}")
+        print(f"    avg chunks/context: {avg_chunks_per_context:.2f} (min {min_chunks_per_context}, max {max_chunks_per_context})")
+
+        # Show a preview of a few largest and smallest chunks for diagnostics
+        preview_count = 2
+        if n > 2 * preview_count:
+            # Find indices of smallest and largest chunks
+            smallest = chunk_sizes_sorted[:preview_count]
+            largest = chunk_sizes_sorted[-preview_count:]
+            print(f"    Smallest chunk sizes: {smallest}")
+            print(f"    Largest chunk sizes: {largest}")
+        # Optionally, print a sample chunk text for manual inspection
+        sample_chunk = None
+        for chunks in context_chunks.values():
+            if chunks:
+                sample_chunk = chunks[0]
+                break
+        if sample_chunk:
+            preview = sample_chunk.text[:120].replace('\n', ' ')
+            print(f"    Sample chunk text: '{preview}...'\n")
+
+        # ── SemanticDensityChunker-only overlap stats ─────────────────────────
+        if chunker_name == "SemanticDensityChunker":
+            overlaps = [
+                chunk.metadata.get("overlap", 0)
+                for chunks in context_chunks.values()
+                for chunk in chunks
+                if hasattr(chunk, "metadata") and chunk.metadata
+            ]
+
+            if overlaps:
+                overlaps_sorted = sorted(overlaps)
+                print(f"    Overlap stats:")
+                print(f"      min  : {min(overlaps)}")
+                print(f"      max  : {max(overlaps)}")
+                print(f"      avg  : {sum(overlaps)/len(overlaps):.1f}")
+                print(f"      median: {overlaps_sorted[len(overlaps_sorted)//2]}")
+                print(f"      p10  : {overlaps_sorted[int(len(overlaps_sorted)*0.10)]}")
+                print(f"      p90  : {overlaps_sorted[int(len(overlaps_sorted)*0.90)]}")
+
 
     num_unique = len(set(ex["context"] for ex in examples))
     print(f"  {num_unique} unique contexts chunked across {len(CHUNKERS)} chunkers.")
