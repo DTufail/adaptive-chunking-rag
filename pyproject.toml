@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rag-chunk-eval"
+version = "0.1.0"
+description = "Benchmarking harness for comparing text chunking strategies in RAG retrieval pipelines"
+authors = [
+    {name = "Daniyal Tufail", email = "daniyal@example.com"},
+]
+license = "MIT"
+requires-python = ">=3.12"
+# Pinned versions live in requirements.txt.
+# Keep this list loose so `pip install -e .` works in any compatible venv.
+dependencies = [
+    "sentence-transformers",
+    "faiss-cpu",
+    "torch",
+    "transformers",
+    "spacy",
+    "numpy",
+    "PyYAML",
+    "matplotlib",
+    "seaborn",
+    "datasets",
+    "pytest",
+]
+
+[project.scripts]
+eval-metrics = "evaluation.eval_metrics:main"
+hyperparameter-search = "utils.hyperparameter_search:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

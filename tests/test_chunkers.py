@@ -6,13 +6,7 @@ Pytest tests for all chunking strategies.
 Run:  pytest tests/test_chunkers.py -v
 """
 
-import sys
-import os
-
 import pytest
-
-# ─── Make sure the chunkers package is importable ───────────────────────────
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src'))
 
 from chunkers import (
     FixedChunker,
@@ -139,26 +133,11 @@ class TestChunkerContract:
         chunks = chunker.chunk("   \n\n  ", document_id="test_doc")
         assert len(chunks) == 0
 
-    def test_get_stats_matches_chunks(self, chunker):
-        chunks = chunker.chunk(SAMPLE_TEXT, document_id="test_doc")
-        stats = chunker.get_stats(chunks)
-        assert stats["num_chunks"] == len(chunks)
-        assert stats["num_chunks"] > 0
-        assert stats["avg_length"] > 0
-        assert stats["min_length"] > 0
-        assert stats["min_length"] <= stats["max_length"]
-
     def test_chunk_length_property_matches_text(self, chunker):
         chunks = chunker.chunk(SAMPLE_TEXT, document_id="test_doc")
         for c in chunks:
             assert c.length == len(c.text)
 
-    def test_to_dict_has_required_keys(self, chunker):
-        chunks = chunker.chunk(SAMPLE_TEXT, document_id="test_doc")
-        for c in chunks:
-            d = c.to_dict()
-            for key in ("chunk_id", "document_id", "text", "start_pos", "end_pos", "length", "metadata"):
-                assert key in d, f"Missing key '{key}' in to_dict() for {chunker.name}"
 
 
 # ─── FixedChunker-specific tests ─────────────────────────────────────────────

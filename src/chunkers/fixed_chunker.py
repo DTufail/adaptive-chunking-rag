@@ -65,6 +65,11 @@ class FixedChunker(BaseChunker):
             end = min(start + self.chunk_size, len(text))
             chunk_text = text[start:end]
 
+            # Skip chunks that are only whitespace
+            if not chunk_text.strip():
+                start += step
+                continue
+
             chunk = Chunk(
                 chunk_id=self._generate_chunk_id(doc_id, chunk_index),
                 document_id=doc_id,

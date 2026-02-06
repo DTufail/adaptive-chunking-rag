@@ -378,6 +378,43 @@ class StructureAwareChunker(BaseChunker):
 
         return chunks, chunk_index
 
+    # ─── Overlap application ────────────────────────────────────────────
+
+    def _apply_overlap(self, chunks: List[Chunk]) -> List[Chunk]:
+        """Prepend overlap characters from each chunk to the next one.
+
+        Snaps the overlap boundary forward to the nearest space so
+        chunks never start mid-word.
+        """
+        if self.overlap <= 0 or len(chunks) <= 1:
+            return chunks
+
+        result = [chunks[0]]
+        for i in range(1, len(chunks)):
+            prev_text = chunks[i - 1].text
+            slice_start = max(0, len(prev_text) - self.overlap)
+
+            # Snap forward to the next space to avoid cutting mid-word.
+            space_idx = prev_text.find(" ", slice_start)
+            if space_idx != -1 and space_idx < len(prev_text):
+                slice_start = space_idx + 1
+
+            overlap_text = prev_text[slice_start:]
+            cur = chunks[i]
+            new_text = overlap_text + cur.text
+            new_start = max(0, cur.start_pos - len(overlap_text))
+
+            result.append(Chunk(
+                chunk_id=cur.chunk_id,
+                document_id=cur.document_id,
+                text=new_text,
+                start_pos=new_start,
+                end_pos=cur.end_pos,
+                metadata=cur.metadata,
+            ))
+
+        return result
+
     # ─── Main chunking logic ─────────────────────────────────────────────
 
     def chunk(self, text: str, document_id: Optional[str] = None) -> List[Chunk]:
@@ -465,7 +502,7 @@ class StructureAwareChunker(BaseChunker):
                     )
                     all_chunks.extend(section_chunks)
 
-        return all_chunks
+        return self._apply_overlap(all_chunks)
 
     def __repr__(self) -> str:
         return (

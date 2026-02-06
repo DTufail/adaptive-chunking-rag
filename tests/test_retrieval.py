@@ -6,14 +6,8 @@ Pytest tests for the FAISS index wrapper and evaluation metric functions.
 Run:  pytest tests/test_retrieval.py -v
 """
 
-import sys
-import os
-
 import numpy as np
 import pytest
-
-# ─── Make sure packages are importable ───────────────────────────────────────
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src'))
 
 from embeddings.faiss_index import FaissIndex
 from evaluation.eval_metrics import compute_hit_rank, derive_metrics

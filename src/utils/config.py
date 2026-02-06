@@ -1,7 +1,7 @@
 """
 config.py
 ─────────
-Configuration loader for the adaptive-chunking-rag project.
+Configuration loader for rag-chunk-eval.
 
 Loads settings from a YAML file and builds chunker instances dynamically.
 """
@@ -85,7 +85,19 @@ def build_chunkers(config: dict) -> Dict[str, Any]:
 
     chunkers = {}
     for name, params in config.get('chunkers', {}).items():
+        # Support suffixed names like "FixedChunker_256": try the full
+        # name first, then progressively strip trailing _segments to
+        # find the class.  Keeps the full name as the dict key so
+        # multiple instances of the same class can coexist.
         cls = CHUNKER_CLASSES.get(name)
+        if cls is None:
+            # Try stripping trailing _suffix segments (e.g. "FixedChunker_256" -> "FixedChunker")
+            candidate = name
+            while "_" in candidate:
+                candidate = candidate.rsplit("_", 1)[0]
+                cls = CHUNKER_CLASSES.get(candidate)
+                if cls is not None:
+                    break
         if cls is None:
             raise ValueError(
                 f"Unknown chunker '{name}'. "

@@ -65,20 +65,14 @@ import hashlib
 import json
 import os
 import random
-import sys
 import time
 from typing import List, Dict, Optional, Tuple
 from collections import defaultdict
 
 import numpy as np
 
-# ─── Importable from project root ────────────────────────────────────────────
-# Add src directory to sys.path so we can import chunkers and embeddings
-src_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
-sys.path.insert(0, os.path.join(src_path, 'src'))
-
 from embeddings.embedding_model import EmbeddingModel
-from embeddings.faiss_index import FaissIndex
+from embeddings.search import numpy_l2_search
 from utils.config import load_config, build_chunkers
 from utils.text_preprocessor import preprocess_context, detect_html_content
 
@@ -216,15 +210,19 @@ def encode_all(
     chunked: Dict[str, Dict[str, list]],
     embed_model: EmbeddingModel,
 ) -> Tuple[
-    Dict[int, np.ndarray],                                          # question vectors
-    Dict[str, Dict[str, Tuple[list, "FaissIndex", Dict[str, object]]]]  # per-chunker indexed cache
+    np.ndarray,                                                      # q_matrix  (N, dim)
+    np.ndarray,                                                      # all_chunk_vectors (M, dim)
+    Dict[str, Dict[str, Tuple[np.ndarray, List[str]]]]              # indexed_cache
 ]:
-    """Batch-encode questions and all chunk texts, build FAISS indexes.
+    """Batch-encode questions and all chunk texts with global deduplication.
 
-    This is where every model forward pass in the entire script lives.
-    Two batch encode() calls: one for all questions, one per chunker
-    for all chunk texts.  sentence-transformers handles the internal
-    mini-batching.
+    Optimised version that:
+    1. Deduplicates chunk texts across ALL chunkers before encoding —
+       identical text produced by different chunkers is encoded once.
+    2. Makes a SINGLE encode() call for all unique chunk texts instead
+       of one call per chunker (5→1).
+    3. Stores lightweight numpy arrays + index lists instead of building
+       ~5000 FaissIndex objects (20-30 vectors each — FAISS is overkill).
 
     Args:
         examples: Filtered example list (for questions).
@@ -232,97 +230,89 @@ def encode_all(
         embed_model: Shared EmbeddingModel instance.
 
     Returns:
-        question_vectors: { example_index: (384,) float32 array }
-        indexed_cache:    { chunker_name: { context: (chunks, FaissIndex, chunk_map) } }
+        q_matrix:          (N, dim) float32 question vectors — index with q_matrix[i].
+        all_chunk_vectors: (M, dim) float32 unique chunk vectors — shared lookup table.
+        indexed_cache:     { chunker_name: { context: (vector_indices, chunk_texts) } }
+                           vector_indices is an int64 array of indices into all_chunk_vectors.
     """
     # ── Questions: one batch call ────────────────────────────────────────────
     print("  Encoding questions...")
     questions = [ex["question"] for ex in examples]
-    q_matrix  = embed_model.encode(questions)                        # (N, 384)
-    question_vectors: Dict[int, np.ndarray] = {
-        i: q_matrix[i] for i in range(len(questions))
-    }
-    print(f"    {len(question_vectors)} question vectors.")
+    q_matrix  = embed_model.encode(questions)                        # (N, dim)
+    print(f"    {len(questions)} question vectors.")
 
-    # ── Chunks: one batch call per chunker ───────────────────────────────────
-    indexed_cache: Dict[str, Dict[str, Tuple[list, FaissIndex, dict]]] = {}
+    # ── Deduplicate chunk texts across ALL chunkers ──────────────────────────
+    print("  Collecting unique chunk texts across all chunkers...")
+    text_to_idx: Dict[str, int] = {}
+    unique_texts: List[str] = []
+    total_chunk_count = 0
 
     for chunker_name, context_chunks in chunked.items():
-        print(f"  Encoding chunks for {chunker_name}...")
-
-        if not context_chunks:
-            indexed_cache[chunker_name] = {}
-            continue
-
-        # Flatten: collect all chunk texts in order, track boundaries.
-        # boundaries[i] = (context, start_index, end_index) into the flat list.
-        contexts_ordered: List[str]   = []
-        flat_texts:       List[str]   = []
-        boundaries:       List[Tuple[str, int, int]] = []
-
         for ctx, chunks in context_chunks.items():
-            start = len(flat_texts)
-            flat_texts.extend(c.text for c in chunks)
-            end = len(flat_texts)
-            contexts_ordered.append(ctx)
-            boundaries.append((ctx, start, end))
+            for chunk in chunks:
+                total_chunk_count += 1
+                if chunk.text not in text_to_idx:
+                    text_to_idx[chunk.text] = len(unique_texts)
+                    unique_texts.append(chunk.text)
 
-        # ONE encode call for all chunk texts of this chunker.
-        all_vectors = embed_model.encode(flat_texts)                 # (M, 384)
+    dedup_saved = total_chunk_count - len(unique_texts)
+    pct = (dedup_saved / total_chunk_count * 100) if total_chunk_count else 0
+    print(f"    {total_chunk_count} total chunks → {len(unique_texts)} unique texts "
+          f"({dedup_saved} duplicates eliminated, {pct:.1f}% saving)")
 
-        # Split vectors back into per-context groups, build index per context.
-        chunker_cache: Dict[str, Tuple[list, FaissIndex, dict]] = {}
+    # ── ONE encode call for all unique chunk texts ───────────────────────────
+    print(f"  Encoding {len(unique_texts)} unique chunk texts (single pass)...")
+    all_chunk_vectors = embed_model.encode(unique_texts, show_progress=True)  # (M, dim)
+    print(f"    {all_chunk_vectors.shape[0]} vectors, "
+          f"{all_chunk_vectors.nbytes / 1e6:.1f} MB")
 
-        for ctx, start, end in boundaries:
-            chunks      = context_chunks[ctx]
-            vectors     = all_vectors[start:end]                     # (n_chunks, 384)
-            chunk_ids   = [c.chunk_id for c in chunks]
+    # ── Build lightweight per-context cache (index arrays, no FAISS) ─────────
+    print("  Building per-context search indexes...")
+    indexed_cache: Dict[str, Dict[str, Tuple[np.ndarray, List[str]]]] = {}
 
-            index = FaissIndex(dimension=embed_model.dimension)
-            index.add(vectors, chunk_ids)
-
-            # Build chunk_map once, cache it — not on every search call.
-            chunk_map = {c.chunk_id: c for c in chunks}
-
-            chunker_cache[ctx] = (chunks, index, chunk_map)
-
+    for chunker_name, context_chunks in chunked.items():
+        chunker_cache: Dict[str, Tuple[np.ndarray, List[str]]] = {}
+        for ctx, chunks in context_chunks.items():
+            vector_indices = np.array(
+                [text_to_idx[c.text] for c in chunks], dtype=np.int64
+            )
+            chunk_texts = [c.text for c in chunks]
+            chunker_cache[ctx] = (vector_indices, chunk_texts)
         indexed_cache[chunker_name] = chunker_cache
-        print(f"    {len(flat_texts)} chunk texts → {len(boundaries)} indexes.")
+        print(f"    {chunker_name}: {len(chunker_cache)} contexts indexed.")
 
-    return question_vectors, indexed_cache
+    return q_matrix, all_chunk_vectors, indexed_cache
 
 
 # ─── Phase C: eval loop (zero encode calls) ─────────────────────────────────
 def search_cached(
-    indexed_cache: Dict[str, Dict[str, Tuple[list, FaissIndex, dict]]],
+    all_chunk_vectors: np.ndarray,
+    indexed_cache: Dict[str, Dict[str, Tuple[np.ndarray, List[str]]]],
     chunker_name: str,
     context: str,
     query_vector: np.ndarray,
     k: int,
 ) -> List[dict]:
-    """Search a pre-built index. No encoding, no chunking, no cache miss path.
+    """Search pre-computed vectors using shared numpy L2 search.
 
     Args:
+        all_chunk_vectors: Global (M, dim) embedding matrix from encode_all().
         indexed_cache: Output of encode_all().
-        chunker_name: Which chunker's index to search.
+        chunker_name: Which chunker's data to search.
         context: The context text (used as key into the cache).
-        query_vector: Pre-computed question vector.
+        query_vector: Pre-computed question vector, shape (dim,).
         k: Number of results.
 
     Returns:
-        List of dicts: rank, score, text.  Empty if context not indexed.
+        List of dicts: rank, score, text. Empty if context not indexed.
     """
     entry = indexed_cache[chunker_name].get(context)
     if entry is None:
         return []
 
-    chunks, index, chunk_map = entry
-    raw_results = index.search(query_vector, k=k)
-
-    return [
-        {"rank": r["rank"], "score": r["score"], "text": chunk_map[r["chunk_id"]].text}
-        for r in raw_results
-    ]
+    vector_indices, chunk_texts = entry
+    vectors = all_chunk_vectors[vector_indices]           # (n, dim) fancy index
+    return numpy_l2_search(vectors, query_vector, chunk_texts, k)
 
 
 # ─── Metrics ─────────────────────────────────────────────────────────────────
@@ -591,7 +581,7 @@ def main() -> None:
 
     # ── 4. Phase B: batch-encode everything (all forward passes) ────────────
     print("\n⏳  Phase B — batch encoding (all model inference runs here)...")
-    question_vectors, indexed_cache = encode_all(examples, chunked, embed_model)
+    q_matrix, all_chunk_vectors, indexed_cache = encode_all(examples, chunked, embed_model)
 
     # ── 5. Phase C: eval loop (zero model calls) ───────────────────────────
     total = len(examples)
@@ -607,10 +597,10 @@ def main() -> None:
     for i, example in enumerate(examples):
         context = example["context"]
         answer  = example["answer"]
-        query_vector = question_vectors[i]
+        query_vector = q_matrix[i]
 
         for chunker_name in chunkers:
-            results  = search_cached(indexed_cache, chunker_name, context, query_vector, k=k_max)
+            results  = search_cached(all_chunk_vectors, indexed_cache, chunker_name, context, query_vector, k=k_max)
             hit_rank = compute_hit_rank(results, answer)
             per_example_hit_ranks[chunker_name].append(hit_rank)
 

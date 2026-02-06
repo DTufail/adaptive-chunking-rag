@@ -117,21 +117,6 @@ def preprocess_html_text(text: str, preserve_structure: bool = True) -> str:
     return text
 
 
-def extract_clean_text(text: str) -> str:
-    """
-    Extract clean text from HTML, removing all structure.
-    
-    Use this when you want pure text without any formatting.
-    
-    Args:
-        text: Raw text potentially containing HTML markup.
-    
-    Returns:
-        Plain text with no HTML or markdown formatting.
-    """
-    return preprocess_html_text(text, preserve_structure=False)
-
-
 def detect_html_content(text: str) -> bool:
     """
     Detect if text contains significant HTML markup.
@@ -175,26 +160,6 @@ def preprocess_context(context: str, auto_detect: bool = True) -> str:
         return context
     
     return preprocess_html_text(context, preserve_structure=True)
-
-
-# ─── Convenience function for batch processing ───────────────────────────────
-def preprocess_examples(examples: list, context_key: str = "context") -> list:
-    """
-    Preprocess all examples in a dataset.
-    
-    Args:
-        examples: List of example dicts.
-        context_key: Key for the context field in each example.
-    
-    Returns:
-        List of examples with preprocessed contexts.
-    """
-    preprocessed = []
-    for ex in examples:
-        ex_copy = ex.copy()
-        ex_copy[context_key] = preprocess_context(ex[context_key])
-        preprocessed.append(ex_copy)
-    return preprocessed
 
 
 if __name__ == "__main__":

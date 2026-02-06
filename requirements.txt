@@ -4,7 +4,7 @@
 # Embedding & retrieval
 sentence-transformers==5.2.2
 faiss-cpu==1.13.2
-torch==2.2.2
+torch==2.4.0
 transformers==5.0.0
 
 # NLP
@@ -14,7 +14,6 @@ spacy==3.8.11
 # Data
 numpy==1.26.4
 PyYAML==6.0.3
-tqdm==4.67.2
 
 # Visualization (used by results/visualize_results.py and hyperparameter_search.py)
 matplotlib==3.10.8
@@ -22,9 +21,6 @@ seaborn==0.13.2
 
 # Data loading (used by src/utils/squad_v2_loader.py and natural_questions_to_squad.py)
 datasets==4.5.0
-
-# Evaluation utilities
-scikit-learn==1.8.0
 
 # Testing
 pytest==9.0.2

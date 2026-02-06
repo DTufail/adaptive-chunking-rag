@@ -51,22 +51,24 @@ class EmbeddingModel:
 
     # Default batch size for encode().  Controls how many texts are
     # tokenized into memory simultaneously inside sentence-transformers.
-    # 64 keeps peak tokenizer memory at (64, 256) int64 tensors — about
-    # 1 MB — regardless of how many texts are passed in total.
+    # 256 keeps peak tokenizer memory at (256, 256) int64 tensors — about
+    # 4 MB — well within reach of 8 GB machines.  all-MiniLM-L6-v2 is
+    # only 22 M params, so larger batches give better CPU throughput.
     # Lower this if OOM persists on < 8 GB machines.
-    DEFAULT_BATCH_SIZE = 64
+    DEFAULT_BATCH_SIZE = 256
 
-    def encode(self, texts: List[str], batch_size: Optional[int] = None) -> np.ndarray:
+    def encode(self, texts: List[str], batch_size: Optional[int] = None, show_progress: bool = False) -> np.ndarray:
         """Encode a list of texts into raw embeddings.
 
         Args:
             texts: List of text strings to encode. Must be non-empty.
             batch_size: How many texts to tokenize and run through the model
                 at once.  Directly controls peak memory during inference.
-                Defaults to DEFAULT_BATCH_SIZE (64).  Pass a smaller value
-                on memory-constrained machines; a larger value on machines
-                with headroom (marginal speed gain from larger batches
-                is small on CPU).
+                Defaults to DEFAULT_BATCH_SIZE (256).  Pass a smaller value
+                on memory-constrained machines.
+            show_progress: If True, print a batch-level progress line to
+                stdout (overwritten in-place).  Useful for large encodes
+                where the caller wants visibility into progress.
 
         Returns:
             2D numpy array of shape (len(texts), DIMENSION) as float32.
@@ -133,6 +135,11 @@ class EmbeddingModel:
         embeddings[:first_end] = first_batch
         del first_batch   # release immediately — data is copied into embeddings
 
+        n_batches = (n + batch_size - 1) // batch_size
+        if show_progress:
+            print(f"\r    Encoding: batch 1/{n_batches} "
+                  f"({min(first_end, n)}/{n} texts)", end="", flush=True)
+
         # Remaining slices.  Each one is tokenized, encoded, written into
         # the pre-allocated array, then discarded.  Peak memory per
         # iteration is (batch_size, 384) — nothing accumulates.
@@ -150,6 +157,14 @@ class EmbeddingModel:
             # batch goes out of scope here — the slice of texts[start:end]
             # and the tokenized tensors are all eligible for GC before
             # the next iteration allocates.
+
+            if show_progress:
+                batch_num = (start // batch_size) + 1
+                print(f"\r    Encoding: batch {batch_num}/{n_batches} "
+                      f"({end}/{n} texts)", end="", flush=True)
+
+        if show_progress:
+            print(f"\r    Encoding: {n}/{n} texts — done.{' ' * 20}")
 
         logger.debug(f"Encoded to shape {embeddings.shape}")
         return embeddings

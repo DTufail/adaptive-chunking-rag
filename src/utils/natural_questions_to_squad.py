@@ -52,6 +52,7 @@ class Config:
     
     # Output
     default_output_path: str = "data/natural_questions_squad.json"
+    create_subsets: bool = True  # Create 100 and 1000 example subsets
     
     # Logging
     log_level: str = "INFO"
@@ -438,13 +439,15 @@ class ConversionPipeline:
     def run(
         self, 
         sample_size: Optional[int] = None,
+        target_size: Optional[int] = None,
         output_path: Optional[str] = None
     ) -> Tuple[List[Dict], ConversionStats]:
         """
         Run the full conversion pipeline.
         
         Args:
-            sample_size: Number of examples to process (None = all)
+            sample_size: Number of raw examples to process (None = all)
+            target_size: Target number of valid converted examples (stops early when reached)
             output_path: Output file path
             
         Returns:
@@ -457,15 +460,24 @@ class ConversionPipeline:
         # Load dataset
         dataset = self._load_dataset()
         
-        # Apply sampling if requested
-        if sample_size:
+        # Create subsets if requested (default behavior with no --sample or --target)
+        if self.config.create_subsets and sample_size is None and target_size is None:
+            self.logger.info("Creating 100 and 1000 example subsets...")
+            self._create_subsets(dataset)
+            return [], self.converter.stats  # Return empty since subsets are saved separately
+        
+        # Target-based conversion: process until we have enough valid examples
+        if target_size:
+            self.logger.info(f"Target: {target_size:,} valid examples (will process as many raw examples as needed)")
+            converted_examples = self._convert_dataset_with_target(dataset, target_size)
+        elif sample_size:
+            # Sample-based: process exactly N raw examples
             dataset = dataset.select(range(min(sample_size, len(dataset))))
-            self.logger.info(f"Processing sample of {len(dataset):,} examples")
+            self.logger.info(f"Processing sample of {len(dataset):,} raw examples")
+            converted_examples = self._convert_dataset(dataset)
         else:
             self.logger.info(f"Processing all {len(dataset):,} examples")
-        
-        # Convert examples
-        converted_examples = self._convert_dataset(dataset)
+            converted_examples = self._convert_dataset(dataset)
         
         # Save results
         output_file = output_path or self.config.default_output_path
@@ -475,6 +487,28 @@ class ConversionPipeline:
         self._print_summary(output_file)
         
         return converted_examples, self.converter.stats
+    
+    def _create_subsets(self, full_dataset):
+        """Create 100 and 1000 example subsets with exactly that many valid examples."""
+        subset_sizes = [100, 1000]
+        
+        for size in subset_sizes:
+            self.logger.info(f"\n{'─'*50}")
+            self.logger.info(f"Creating subset with exactly {size} valid examples...")
+            self.logger.info(f"{'─'*50}")
+            
+            # Reset converter stats for each subset
+            self.converter = NQToSQuADConverter(self.config, self.logger)
+            
+            # Use target-based conversion to get exactly `size` valid examples
+            converted_examples = self._convert_dataset_with_target(full_dataset, target_size=size)
+            
+            # Save with appropriate filename
+            output_file = f"data/natural_questions_squad_{size}.json"
+            self._save_results(converted_examples, output_file)
+            
+            # Print summary for this subset
+            self._print_summary(output_file)
     
     def _load_dataset(self):
         """Load Natural Questions dataset with proper config and split."""
@@ -500,6 +534,41 @@ class ConversionPipeline:
         except Exception as e:
             self.logger.error(f"Failed to load dataset: {e}")
             raise
+    
+    def _convert_dataset_with_target(self, dataset, target_size: int) -> List[Dict]:
+        """Convert examples until we reach the target number of valid examples."""
+        self.logger.info(f"Converting examples to SQuAD format (target: {target_size:,} valid)...")
+        self.logger.info(f"  Filters: min_answer={self.config.min_answer_length}, "
+                        f"context={self.config.min_context_length}-{self.config.max_context_length}")
+        
+        converted_examples = []
+        
+        with tqdm(total=target_size, desc="Converting", unit="valid") as pbar:
+            for example in dataset:
+                squad_example = self.converter.convert_example(example)
+                
+                if squad_example:
+                    converted_examples.append(squad_example)
+                    pbar.update(1)
+                
+                if len(converted_examples) >= target_size:
+                    break
+        
+        raw_processed = self.converter.stats.total_processed
+        self.logger.info(
+            f"✓ Target reached: {len(converted_examples):,} valid examples "
+            f"from {raw_processed:,} raw examples "
+            f"({len(converted_examples)/max(raw_processed,1)*100:.1f}% yield)"
+        )
+        
+        if len(converted_examples) < target_size:
+            self.logger.warning(
+                f"⚠ Could only produce {len(converted_examples):,} valid examples "
+                f"from {raw_processed:,} available raw examples "
+                f"(target was {target_size:,})"
+            )
+        
+        return converted_examples
     
     def _convert_dataset(self, dataset) -> List[Dict]:
         """Convert all examples in dataset."""
@@ -621,14 +690,23 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Convert first 100 examples
+  # Create 100 and 1000 valid example subsets (default behavior)
+  python natural_questions_to_squad.py
+  
+  # Get exactly 100 valid examples (processes ~400 raw)
+  python natural_questions_to_squad.py --target 100
+  
+  # Get exactly 1000 valid examples (processes ~4000 raw)
+  python natural_questions_to_squad.py --target 1000
+  
+  # Process first 100 raw examples (may yield ~26 valid)
   python natural_questions_to_squad.py --sample 100
   
-  # Convert all examples with custom output
-  python natural_questions_to_squad.py --output my_data.json
+  # Custom output path
+  python natural_questions_to_squad.py --target 500 --output data/nq_500.json
   
   # Enable debug logging
-  python natural_questions_to_squad.py --log-level DEBUG --sample 10
+  python natural_questions_to_squad.py --log-level DEBUG --target 10
         """
     )
     
@@ -636,7 +714,14 @@ Examples:
         '--sample',
         type=int,
         default=None,
-        help='Process only first N examples (default: all)'
+        help='Process only first N raw examples (yields ~26%% valid examples)'
+    )
+    
+    parser.add_argument(
+        '--target', '-t',
+        type=int,
+        default=None,
+        help='Target number of valid converted examples (processes as many raw examples as needed)'
     )
     
     parser.add_argument(
@@ -677,12 +762,16 @@ Examples:
     
     args = parser.parse_args()
     
+    # Disable auto subset creation if --sample or --target is explicitly given
+    create_subsets = (args.sample is None and args.target is None)
+    
     # Setup configuration
     config = Config(
         log_level=args.log_level,
         min_answer_length=args.min_answer_length,
         min_context_length=args.min_context_length,
-        max_context_length=args.max_context_length
+        max_context_length=args.max_context_length,
+        create_subsets=create_subsets
     )
     
     # Setup logging
@@ -695,6 +784,7 @@ Examples:
     try:
         pipeline.run(
             sample_size=args.sample,
+            target_size=args.target,
             output_path=args.output
         )
         sys.exit(0)

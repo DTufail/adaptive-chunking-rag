@@ -132,6 +132,10 @@ class SentenceChunker(BaseChunker):
             end_pos = current_sentences[-1]["end"]
             chunk_text = text[start_pos:end_pos]
 
+            # Skip chunks that are only whitespace
+            if not chunk_text.strip():
+                continue
+
             chunk = Chunk(
                 chunk_id=self._generate_chunk_id(doc_id, chunk_index),
                 document_id=doc_id,

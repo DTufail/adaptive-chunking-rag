@@ -26,7 +26,6 @@ import hashlib
 import json
 import os
 import random
-import sys
 import time
 import argparse
 from pathlib import Path
@@ -36,20 +35,16 @@ import itertools
 import numpy as np
 import matplotlib.pyplot as plt
 
-# Add src to path
-src_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
-sys.path.insert(0, os.path.join(src_path, 'src'))
-
 from chunkers import (
-    FixedChunker, 
-    RecursiveChunker, 
-    SentenceChunker, 
+    FixedChunker,
+    RecursiveChunker,
+    SentenceChunker,
     ParagraphChunker,
-    StructureAwareChunker, 
+    StructureAwareChunker,
     SemanticDensityChunker
 )
 from embeddings.embedding_model import EmbeddingModel
-from embeddings.faiss_index import FaissIndex
+from embeddings.search import numpy_l2_search
 from utils.config import load_config
 
 
@@ -257,41 +252,35 @@ def chunk_all_contexts(examples: List[Dict], chunker) -> Dict[str, List]:
 
 
 def encode_chunks_and_index(context_chunks: Dict, embed_model: EmbeddingModel) -> Dict:
-    """Encode chunks and build FAISS indexes for each context.
-    
+    """Encode chunks and build per-context numpy search caches.
+
     Returns:
-        indexed_cache: {context: (chunks, index, chunk_map)}
+        indexed_cache: {context: (vectors, chunk_texts)}
+            vectors is a float32 (n, dim) array, chunk_texts is a list of strings.
     """
     # Collect all chunk texts with boundaries
     flat_texts = []
     boundaries = []
-    
+
     for ctx, chunks in context_chunks.items():
         start = len(flat_texts)
         flat_texts.extend(c.text for c in chunks)
         end = len(flat_texts)
         boundaries.append((ctx, start, end))
-    
+
     # Encode all chunks in one batch
     if flat_texts:
         all_vectors = embed_model.encode(flat_texts)
     else:
         all_vectors = np.array([]).reshape(0, embed_model.dimension)
-    
-    # Build per-context indexes
+
+    # Build per-context lightweight caches (numpy arrays, no FAISS)
     indexed_cache = {}
     for ctx, start, end in boundaries:
-        chunks = context_chunks[ctx]
         vectors = all_vectors[start:end]
-        chunk_ids = [c.chunk_id for c in chunks]
-        
-        # Build FAISS index
-        index = FaissIndex(dimension=embed_model.dimension)
-        index.add(vectors, chunk_ids)
-        
-        chunk_map = {c.chunk_id: c for c in chunks}
-        indexed_cache[ctx] = (chunks, index, chunk_map)
-    
+        chunk_texts = [c.text for c in context_chunks[ctx]]
+        indexed_cache[ctx] = (vectors, chunk_texts)
+
     return indexed_cache
 
 
@@ -334,18 +323,13 @@ def search_and_evaluate(examples: List[Dict],
 
 
 def search_cached(indexed_cache: Dict, context: str, query_vector: np.ndarray, k: int) -> List[Dict]:
-    """Search pre-built index."""
+    """Search pre-computed vectors using shared numpy L2 search."""
     entry = indexed_cache.get(context)
     if entry is None:
         return []
-    
-    chunks, index, chunk_map = entry
-    raw_results = index.search(query_vector, k=k)
-    
-    return [
-        {"rank": r["rank"], "score": r["score"], "text": chunk_map[r["chunk_id"]].text}
-        for r in raw_results
-    ]
+
+    vectors, chunk_texts = entry
+    return numpy_l2_search(vectors, query_vector, chunk_texts, k)
 
 
 def compute_hit_rank(results: List[Dict], answer: str) -> int:
