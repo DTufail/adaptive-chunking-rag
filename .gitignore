@@ -33,3 +33,5 @@ results/eval_metrics.json
 results/hyperparameter_search/
 results/visualizations/
 analysis/
+.vscode/
+.claude/
