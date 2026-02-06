@@ -16,10 +16,10 @@ import re
 from typing import List, Optional
 from collections import Counter
 
-import spacy
 from spacy.language import Language
 
 from .base_chunker import BaseChunker, Chunk
+from ._spacy_cache import get_spacy_model
 
 
 class SemanticDensityChunker(BaseChunker):
@@ -34,8 +34,8 @@ class SemanticDensityChunker(BaseChunker):
         self,
         chunk_size: int = 1024,
         min_chunk_size: int = 200,
-        min_overlap: int = 50,
-        max_overlap: int = 50,
+        min_overlap: int = 25,
+        max_overlap: int = 75,
         density_window: int = 300,
         high_density_threshold: float = 0.6,
         low_density_threshold: float = 0.3,
@@ -79,20 +79,11 @@ class SemanticDensityChunker(BaseChunker):
         self.high_density_threshold = high_density_threshold
         self.low_density_threshold = low_density_threshold
         self.spacy_model = spacy_model
-        self._nlp: Optional[Language] = None
 
     @property
     def nlp(self) -> Language:
-        """Lazy-load spaCy model."""
-        if self._nlp is None:
-            try:
-                self._nlp = spacy.load(self.spacy_model)
-            except OSError:
-                raise OSError(
-                    f"spaCy model '{self.spacy_model}' not found. "
-                    f"Install: python -m spacy download {self.spacy_model}"
-                )
-        return self._nlp
+        """Return the process-cached full spaCy pipeline (needed for NER)."""
+        return get_spacy_model(self.spacy_model)
 
     # ─── Density metrics ─────────────────────────────────────────────────
 

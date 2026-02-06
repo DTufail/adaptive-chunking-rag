@@ -1,26 +1,15 @@
 """
 test_chunkers.py
-─────────────────
-Manual comparison test: runs all 4 baseline chunkers on the same text
-from your train_100.json so you can see exactly how each one behaves.
+────────────────
+Pytest tests for all chunking strategies.
 
-HOW TO RUN:
-─────────────
-    cd /Users/daniyal/adaptive-chunking-rag
-    python test_chunkers.py
-
-REQUIREMENTS:
-─────────────
-- Your chunkers/ folder must be in the same directory (or on sys.path)
-- spaCy + en_core_web_sm installed:
-      pip install spacy
-      python -m spacy download en_core_web_sm
-- train_100.json at: data/train_100.json
+Run:  pytest tests/test_chunkers.py -v
 """
 
-import json
 import sys
 import os
+
+import pytest
 
 # ─── Make sure the chunkers package is importable ───────────────────────────
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src'))
@@ -30,124 +19,261 @@ from chunkers import (
     SentenceChunker,
     ParagraphChunker,
     RecursiveChunker,
+    StructureAwareChunker,
+    SemanticDensityChunker,
+)
+from chunkers.base_chunker import Chunk
+
+
+# ─── Test data ───────────────────────────────────────────────────────────────
+SAMPLE_TEXT = (
+    "The Amazon rainforest, also known as Amazonia, is a moist broadleaf tropical "
+    "rainforest in the Amazon biome that covers most of the Amazon basin of South America. "
+    "This basin encompasses 7,000,000 km2, of which 5,500,000 km2 are covered by the "
+    "rainforest. This region includes territory belonging to nine nations and 3,344 "
+    "formally acknowledged indigenous territories.\n\n"
+    "The majority of the forest is contained within Brazil, with 60% of the rainforest, "
+    "followed by Peru with 13%, Colombia with 10%, and with minor amounts in Bolivia, "
+    "Ecuador, French Guiana, Guyana, Suriname, and Venezuela.\n\n"
+    "The Amazon represents over half of the planet's remaining rainforests, and comprises "
+    "the largest and most biodiverse tract of tropical rainforest in the world, with an "
+    "estimated 390 billion individual trees divided into 16,000 species. More than 30 "
+    "million people live in the Amazon region, which is subdivided into different protected "
+    "areas and indigenous territories.\n\n"
+    "Deforestation in the Amazon rainforest threatens many species such as the giant otter, "
+    "the jaguar, and many species of birds. The tropical rainforests of South America "
+    "contain the largest diversity of species on Earth."
 )
 
-# ─── Config ──────────────────────────────────────────────────────────────────
-DATA_PATH = "data/train_100.json"
-
-# Which example indices from your dataset to test on (0-indexed)
-# Change these to look at different examples
-EXAMPLE_INDICES = [63, 76, 99]
-
-# ─── Load data ───────────────────────────────────────────────────────────────
-def load_examples(path: str, indices: list) -> list:
-    with open(path, "r") as f:
-        data = json.load(f)
-    examples = data["examples"]
-    selected = []
-    for i in indices:
-        if i < len(examples):
-            selected.append(examples[i])
-        else:
-            print(f"⚠  Index {i} out of range (dataset has {len(examples)} examples). Skipping.")
-    return selected
+SHORT_TEXT = "Hello world. This is a test."
+EMPTY_TEXT = ""
 
 
-# ─── Define all chunkers with matching configs ──────────────────────────────
-# All use ~512 char target so the comparison is apples-to-apples.
-CHUNKERS = {
-    "FixedChunker":     FixedChunker(chunk_size=512, overlap=50),
-    "SentenceChunker":  SentenceChunker(max_chars=512, overlap_sentences=1),
-    "ParagraphChunker": ParagraphChunker(max_chars=512, min_chars=100),
-    "RecursiveChunker": RecursiveChunker(max_chars=512, overlap=50),
-}
+# ─── Fixtures ────────────────────────────────────────────────────────────────
+#
+# Chunker instances are created once per test session (not per test).
+# This matters for spaCy-backed chunkers: the model loads once via the
+# process-level cache in _spacy_cache.py, making the full suite run in
+# seconds instead of minutes.
+
+# Chunkers that don't need spaCy — instantiation is cheap
+FAST_CHUNKERS = [
+    pytest.param(FixedChunker(chunk_size=200, overlap=30), id="FixedChunker"),
+    pytest.param(ParagraphChunker(max_chars=300, min_chars=50), id="ParagraphChunker"),
+    pytest.param(RecursiveChunker(max_chars=200, overlap=30), id="RecursiveChunker"),
+]
+
+# Chunkers that use spaCy — model loads once via process-level cache
+SPACY_CHUNKERS = [
+    pytest.param(
+        SentenceChunker(max_chars=300, overlap_sentences=1),
+        id="SentenceChunker",
+    ),
+    pytest.param(
+        StructureAwareChunker(chunk_size=300, min_chunk_size=50, overlap=30),
+        id="StructureAwareChunker",
+    ),
+    pytest.param(
+        SemanticDensityChunker(chunk_size=300, min_chunk_size=50, min_overlap=25, max_overlap=75),
+        id="SemanticDensityChunker",
+    ),
+]
+
+ALL_CHUNKERS = FAST_CHUNKERS + SPACY_CHUNKERS
 
 
-# ─── Display helpers ─────────────────────────────────────────────────────────
-def print_separator(char="─", width=70):
-    print(char * width)
+@pytest.fixture(params=ALL_CHUNKERS)
+def chunker(request):
+    """Parametrized fixture that yields every chunker in turn."""
+    return request.param
 
 
-def print_chunk_detail(chunk, show_text=True):
-    """Print one chunk with its metadata."""
-    print(f"    Chunk {chunk.metadata['chunk_index']:>2} | "
-          f"pos [{chunk.start_pos:>4}:{chunk.end_pos:>4}] | "
-          f"len {chunk.length:>4} chars")
-    if show_text:
-        # Indent and wrap the text for readability
-        lines = chunk.text.strip().replace("\n", "\n      ")
-        print(f"      \"{lines}\"")
-        print()
+@pytest.fixture(params=FAST_CHUNKERS)
+def fast_chunker(request):
+    """Parametrized fixture for chunkers that don't need spaCy."""
+    return request.param
 
 
-def print_stats(chunker_name, chunks):
-    """Print a quick stats summary for a chunker's output."""
-    if not chunks:
-        print(f"    ⚠  No chunks produced.")
-        return
+# ─── Contract tests: every chunker must satisfy these ────────────────────────
 
-    lengths = [c.length for c in chunks]
-    print(f"    Count: {len(chunks)} chunks | "
-          f"Min: {min(lengths)} | "
-          f"Max: {max(lengths)} | "
-          f"Avg: {sum(lengths)/len(lengths):.0f} chars")
+class TestChunkerContract:
+    """Basic contract tests that every chunker must satisfy."""
+
+    def test_produces_chunks_on_normal_text(self, chunker):
+        chunks = chunker.chunk(SAMPLE_TEXT, document_id="test_doc")
+        assert len(chunks) > 0, f"{chunker.name} produced 0 chunks"
+
+    def test_all_chunks_are_nonempty(self, chunker):
+        chunks = chunker.chunk(SAMPLE_TEXT, document_id="test_doc")
+        for c in chunks:
+            assert c.text.strip(), f"{chunker.name} produced empty chunk: {c.chunk_id}"
+
+    def test_chunks_are_chunk_instances(self, chunker):
+        chunks = chunker.chunk(SAMPLE_TEXT, document_id="test_doc")
+        for c in chunks:
+            assert isinstance(c, Chunk)
+
+    def test_chunk_positions_are_nonnegative(self, chunker):
+        chunks = chunker.chunk(SAMPLE_TEXT, document_id="test_doc")
+        for c in chunks:
+            assert c.start_pos >= 0, f"start_pos={c.start_pos} in {chunker.name}"
+            assert c.end_pos >= c.start_pos, (
+                f"end_pos={c.end_pos} < start_pos={c.start_pos} in {chunker.name}"
+            )
+
+    def test_chunk_ids_are_unique(self, chunker):
+        chunks = chunker.chunk(SAMPLE_TEXT, document_id="test_doc")
+        ids = [c.chunk_id for c in chunks]
+        assert len(ids) == len(set(ids)), f"Duplicate chunk IDs in {chunker.name}"
+
+    def test_document_ids_are_consistent(self, chunker):
+        chunks = chunker.chunk(SAMPLE_TEXT, document_id="test_doc")
+        for c in chunks:
+            assert c.document_id == "test_doc"
+
+    def test_empty_text_returns_no_chunks(self, chunker):
+        chunks = chunker.chunk(EMPTY_TEXT, document_id="test_doc")
+        assert len(chunks) == 0
+
+    def test_whitespace_only_returns_no_chunks(self, chunker):
+        chunks = chunker.chunk("   \n\n  ", document_id="test_doc")
+        assert len(chunks) == 0
+
+    def test_get_stats_matches_chunks(self, chunker):
+        chunks = chunker.chunk(SAMPLE_TEXT, document_id="test_doc")
+        stats = chunker.get_stats(chunks)
+        assert stats["num_chunks"] == len(chunks)
+        assert stats["num_chunks"] > 0
+        assert stats["avg_length"] > 0
+        assert stats["min_length"] > 0
+        assert stats["min_length"] <= stats["max_length"]
+
+    def test_chunk_length_property_matches_text(self, chunker):
+        chunks = chunker.chunk(SAMPLE_TEXT, document_id="test_doc")
+        for c in chunks:
+            assert c.length == len(c.text)
+
+    def test_to_dict_has_required_keys(self, chunker):
+        chunks = chunker.chunk(SAMPLE_TEXT, document_id="test_doc")
+        for c in chunks:
+            d = c.to_dict()
+            for key in ("chunk_id", "document_id", "text", "start_pos", "end_pos", "length", "metadata"):
+                assert key in d, f"Missing key '{key}' in to_dict() for {chunker.name}"
 
 
-# ─── Main comparison loop ───────────────────────────────────────────────────
-def run_comparison():
-    examples = load_examples(DATA_PATH, EXAMPLE_INDICES)
+# ─── FixedChunker-specific tests ─────────────────────────────────────────────
 
-    if not examples:
-        print("❌  No examples loaded. Check DATA_PATH and EXAMPLE_INDICES.")
-        return
+class TestFixedChunker:
 
-    for ex_idx, example in enumerate(examples):
-        context = example["context"]
-        question = example["question"]
-        answer   = example["answer"]
+    def test_all_but_last_chunk_match_target_size(self):
+        chunker = FixedChunker(chunk_size=200, overlap=0)
+        chunks = chunker.chunk(SAMPLE_TEXT, document_id="test")
+        for c in chunks[:-1]:
+            assert len(c.text) == 200
 
-        # ── Header ──
-        print("\n")
-        print("=" * 70)
-        print(f"  EXAMPLE {EXAMPLE_INDICES[ex_idx]}")
-        print("=" * 70)
-        print(f"  Question : {question}")
-        print(f"  Answer   : {answer}")
-        print(f"  Context  : {len(context)} chars")
-        print_separator()
+    def test_overlap_creates_more_chunks(self):
+        no_overlap = FixedChunker(chunk_size=200, overlap=0)
+        with_overlap = FixedChunker(chunk_size=200, overlap=50)
+        chunks_without = no_overlap.chunk(SAMPLE_TEXT)
+        chunks_with = with_overlap.chunk(SAMPLE_TEXT)
+        assert len(chunks_with) >= len(chunks_without)
 
-        # ── Run each chunker on the same context ──
-        for name, chunker in CHUNKERS.items():
-            print(f"\n  📦  {name}")
-            print_separator("─", 70)
+    def test_invalid_overlap_raises(self):
+        with pytest.raises(ValueError):
+            FixedChunker(chunk_size=100, overlap=100)
 
-            chunks = chunker.chunk(context, document_id=f"example_{EXAMPLE_INDICES[ex_idx]}")
-
-            # Stats line
-            print_stats(name, chunks)
-            print()
-
-            # Show each chunk
-            for chunk in chunks:
-                print_chunk_detail(chunk, show_text=True)
-
-        # ── Quick side-by-side stats comparison at the end of each example ──
-        print()
-        print_separator("─", 70)
-        print("  📊  SIDE-BY-SIDE STATS")
-        print_separator("─", 70)
-        print(f"  {'Chunker':<22} {'Chunks':>6} {'Min':>6} {'Max':>6} {'Avg':>6}")
-        print(f"  {'─'*22} {'─'*6} {'─'*6} {'─'*6} {'─'*6}")
-
-        for name, chunker in CHUNKERS.items():
-            chunks = chunker.chunk(context, document_id=f"example_{EXAMPLE_INDICES[ex_idx]}")
-            if chunks:
-                lengths = [c.length for c in chunks]
-                print(f"  {name:<22} {len(chunks):>6} {min(lengths):>6} {max(lengths):>6} {sum(lengths)/len(lengths):>6.0f}")
-            else:
-                print(f"  {name:<22}      0     —     —     —")
+    def test_negative_size_raises(self):
+        with pytest.raises(ValueError):
+            FixedChunker(chunk_size=-1)
 
 
-# ─── Entry point ─────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    run_comparison()
+# ─── ParagraphChunker-specific tests ─────────────────────────────────────────
+
+class TestParagraphChunker:
+
+    def test_respects_paragraph_boundaries(self):
+        text = "Paragraph one with some content.\n\nParagraph two with more.\n\nParagraph three final."
+        chunker = ParagraphChunker(max_chars=1000, min_chars=5)
+        chunks = chunker.chunk(text, document_id="test")
+        assert len(chunks) >= 1
+
+    def test_invalid_min_max_raises(self):
+        with pytest.raises(ValueError):
+            ParagraphChunker(max_chars=100, min_chars=200)
+
+
+# ─── RecursiveChunker-specific tests ─────────────────────────────────────────
+
+class TestRecursiveChunker:
+
+    def test_chunks_within_max_chars(self):
+        chunker = RecursiveChunker(max_chars=200, overlap=0)
+        chunks = chunker.chunk(SAMPLE_TEXT, document_id="test")
+        for c in chunks:
+            # Allow small tolerance for boundary alignment
+            assert len(c.text) <= 210, f"Chunk too large: {len(c.text)} chars"
+
+    def test_invalid_config_raises(self):
+        with pytest.raises(ValueError):
+            RecursiveChunker(max_chars=100, overlap=100)
+
+
+# ─── SemanticDensityChunker-specific tests ───────────────────────────────────
+
+class TestSemanticDensityChunker:
+
+    def test_default_overlap_range(self):
+        """Verify the fixed defaults actually enable adaptive behavior."""
+        chunker = SemanticDensityChunker()
+        assert chunker.min_overlap == 25, "min_overlap should default to 25"
+        assert chunker.max_overlap == 75, "max_overlap should default to 75"
+
+    def test_density_to_overlap_low(self):
+        chunker = SemanticDensityChunker(min_overlap=25, max_overlap=75)
+        assert chunker._density_to_overlap(0.0) == 25
+
+    def test_density_to_overlap_high(self):
+        chunker = SemanticDensityChunker(min_overlap=25, max_overlap=75)
+        assert chunker._density_to_overlap(1.0) == 75
+
+    def test_density_to_overlap_mid(self):
+        chunker = SemanticDensityChunker(
+            min_overlap=25, max_overlap=75,
+            low_density_threshold=0.3, high_density_threshold=0.6,
+        )
+        mid = chunker._density_to_overlap(0.45)
+        assert 25 <= mid <= 75
+
+    def test_invalid_overlap_range_raises(self):
+        with pytest.raises(ValueError):
+            SemanticDensityChunker(min_overlap=80, max_overlap=50)
+
+    def test_metadata_contains_density_and_overlap(self):
+        chunker = SemanticDensityChunker(chunk_size=300, min_chunk_size=50)
+        chunks = chunker.chunk(SAMPLE_TEXT, document_id="test")
+        for c in chunks:
+            assert "density_score" in c.metadata
+            assert "overlap" in c.metadata
+            assert 0.0 <= c.metadata["density_score"] <= 1.0
+
+    def test_spacy_model_is_process_cached(self):
+        """Two instances should share the same underlying spaCy model."""
+        a = SemanticDensityChunker()
+        b = SemanticDensityChunker()
+        assert a.nlp is b.nlp, "spaCy model should be shared across instances"
+
+
+# ─── StructureAwareChunker-specific tests ────────────────────────────────────
+
+class TestStructureAwareChunker:
+
+    def test_handles_markdown_headings(self):
+        text = "# Introduction\n\nSome intro text here.\n\n## Details\n\nMore detailed content."
+        chunker = StructureAwareChunker(chunk_size=500, min_chunk_size=10, overlap=0)
+        chunks = chunker.chunk(text, document_id="test")
+        assert len(chunks) >= 1
+
+    def test_handles_plain_text(self):
+        chunker = StructureAwareChunker(chunk_size=300, min_chunk_size=50, overlap=30)
+        chunks = chunker.chunk(SAMPLE_TEXT, document_id="test")
+        assert len(chunks) > 0

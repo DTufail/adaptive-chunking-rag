@@ -17,18 +17,24 @@ class EmbeddingModel:
     are left to the index layer (FaissIndex uses L2).
     """
 
-    DIMENSION = 384  # Output dimension for all-MiniLM-L6-v2
+    DEFAULT_MODEL_NAME = "all-MiniLM-L6-v2"
+    DEFAULT_DIMENSION = 384
 
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
+    def __init__(self, model_name: str = DEFAULT_MODEL_NAME, dimension: Optional[int] = DEFAULT_DIMENSION):
         """Initialize the embedding model wrapper.
 
         Args:
             model_name: Name of the sentence-transformers model to use.
-                Defaults to "all-MiniLM-L6-v2" (384-dimensional embeddings).
+                Defaults to "all-MiniLM-L6-v2".
+            dimension: Expected output embedding dimension for this model.
+                If None, the dimension will be inferred from the first encode.
         """
         self.model_name = model_name
+        self.dimension = dimension
         self._model: Optional[SentenceTransformer] = None
-        logger.debug(f"EmbeddingModel initialized with model_name={model_name}")
+        logger.debug(
+            f"EmbeddingModel initialized with model_name={model_name}, dimension={dimension}"
+        )
 
     @property
     def model(self) -> SentenceTransformer:
@@ -111,16 +117,19 @@ class EmbeddingModel:
         if first_batch.dtype != np.float32:
             first_batch = first_batch.astype(np.float32)
 
-        if first_batch.shape[1] != self.DIMENSION:
+        inferred_dim = first_batch.shape[1]
+        if self.dimension is None:
+            self.dimension = inferred_dim
+        elif inferred_dim != self.dimension:
             raise ValueError(
                 f"Model '{self.model_name}' returned vectors of dimension "
-                f"{first_batch.shape[1]}, expected {self.DIMENSION}. "
-                f"Update DIMENSION if you changed the model."
+                f"{inferred_dim}, expected {self.dimension}. "
+                f"Update the configured dimension to match the model."
             )
 
         # Pre-allocate the full output array.  Only allocation for the
         # entire encode call — no reallocs, no list-of-arrays.
-        embeddings = np.empty((n, self.DIMENSION), dtype=np.float32)
+        embeddings = np.empty((n, self.dimension), dtype=np.float32)
         embeddings[:first_end] = first_batch
         del first_batch   # release immediately — data is copied into embeddings
 

@@ -22,9 +22,11 @@ For each valid config:
 """
 
 import gc
+import hashlib
 import json
-import sys
 import os
+import random
+import sys
 import time
 import argparse
 from pathlib import Path
@@ -48,6 +50,7 @@ from chunkers import (
 )
 from embeddings.embedding_model import EmbeddingModel
 from embeddings.faiss_index import FaissIndex
+from utils.config import load_config
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -58,8 +61,8 @@ MIN_ANSWER_LENGTH = 4
 K_MAX = 5
 K_VALUES = [1, 3, 5]
 
-OUTPUT_DIR = Path("results/hyperparameter_search")
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+# Will be set in main() based on dataset name
+OUTPUT_DIR = None
 
 # Grid search space
 CHUNK_SIZES = [256, 384, 512, 768, 1024]
@@ -109,43 +112,88 @@ Available chunkers: FixedChunker, RecursiveChunker, SentenceChunker,
         choices=list(AVAILABLE_CHUNKERS.keys()),
         help='Chunker type(s) to test. If not specified, all chunkers are tested.'
     )
+
+    parser.add_argument(
+        '--config',
+        default=None,
+        help='Path to YAML config (default: configs/default.yaml)'
+    )
     
     parser.add_argument(
         '--data', '-d',
-        default=DATA_PATH,
-        help=f'Path to dataset (default: {DATA_PATH})'
+        default=None,
+        help='Path to dataset (overrides config data.path)'
+    )
+
+    parser.add_argument(
+        '--model-name',
+        default=None,
+        help='Embedding model name (overrides config)'
+    )
+
+    parser.add_argument(
+        '--dimension',
+        type=int,
+        default=None,
+        help='Embedding dimension (overrides config)'
+    )
+
+    parser.add_argument(
+        '--seed',
+        type=int,
+        default=None,
+        help='Random seed (overrides config)'
     )
     
     return parser.parse_args()
 
 
 def create_chunker(chunker_type: str, chunk_size: int, overlap: int):
-    """Create a chunker instance based on type and parameters."""
+    """Create a chunker instance based on type and parameters.
+
+    Each chunker has a different interface for size/overlap. This function
+    maps the generic (chunk_size, overlap) grid-search parameters to the
+    correct constructor kwargs for each chunker type.
+
+    Notes:
+        - SentenceChunker uses `overlap_sentences` (sentence count), not
+          character overlap.  We convert: 0→0, 25→1, 50→1, 75→2, 100→2.
+        - ParagraphChunker has no overlap — it uses min_chars for merge
+          control.  We map overlap to min_chars (higher overlap → lower
+          min_chars threshold, allowing more merging).
+        - SemanticDensityChunker uses min_overlap / max_overlap range.
+    """
     chunker_class = AVAILABLE_CHUNKERS[chunker_type]
-    
+
     if chunker_type == "FixedChunker":
         return chunker_class(chunk_size=chunk_size, overlap=overlap)
-    
+
     elif chunker_type == "RecursiveChunker":
         return chunker_class(max_chars=chunk_size, overlap=overlap)
-    
+
     elif chunker_type == "SentenceChunker":
-        return chunker_class(max_chars=chunk_size, overlap=overlap)
-    
+        # Convert character overlap to sentence overlap count
+        # 0→0, 25→1, 50→1, 75→2, 100→2
+        overlap_sentences = max(0, (overlap + 24) // 50)
+        return chunker_class(max_chars=chunk_size, overlap_sentences=overlap_sentences)
+
     elif chunker_type == "ParagraphChunker":
-        return chunker_class(max_chars=chunk_size, overlap=overlap)
-    
+        # ParagraphChunker has no overlap param — use min_chars instead.
+        # Higher overlap → lower min_chars (more merging of small paragraphs)
+        min_chars = max(50, 200 - overlap)
+        return chunker_class(max_chars=chunk_size, min_chars=min_chars)
+
     elif chunker_type == "StructureAwareChunker":
         return chunker_class(chunk_size=chunk_size, overlap=overlap)
-    
+
     elif chunker_type == "SemanticDensityChunker":
-        # SemanticDensityChunker uses different parameter names
+        # Map to adaptive overlap range centered on the grid value
         return chunker_class(
-            chunk_size=chunk_size, 
-            min_overlap=max(overlap - 25, 0),  # Convert overlap to min_overlap
-            max_overlap=overlap + 25  # Set max_overlap slightly higher
+            chunk_size=chunk_size,
+            min_overlap=max(overlap - 25, 0),
+            max_overlap=overlap + 25,
         )
-    
+
     else:
         raise ValueError(f"Unknown chunker type: {chunker_type}")
 
@@ -188,16 +236,23 @@ def embed_questions_once(examples: List[Dict], embed_model: EmbeddingModel) -> n
 # PER-CONFIG: Chunk, Embed Chunks, Index
 # ═══════════════════════════════════════════════════════════════════════════
 def chunk_all_contexts(examples: List[Dict], chunker) -> Dict[str, List]:
-    """Chunk all unique contexts."""
-    unique_contexts = list(set(ex["context"] for ex in examples))
-    
+    """Chunk all unique contexts (order-preserving for reproducibility)."""
+    # Ordered dedup — deterministic across runs (unlike set())
+    seen: Dict[str, bool] = {}
+    unique_contexts: List[str] = []
+    for ex in examples:
+        ctx = ex["context"]
+        if ctx not in seen:
+            seen[ctx] = True
+            unique_contexts.append(ctx)
+
     context_chunks = {}
     for ctx in unique_contexts:
-        doc_id = f"ctx_{hash(ctx) % (10**8)}"
+        doc_id = f"ctx_{hashlib.sha256(ctx.encode()).hexdigest()[:8]}"
         chunks = chunker.chunk(ctx, document_id=doc_id)
         if chunks:
             context_chunks[ctx] = chunks
-    
+
     return context_chunks
 
 
@@ -221,7 +276,7 @@ def encode_chunks_and_index(context_chunks: Dict, embed_model: EmbeddingModel) -
     if flat_texts:
         all_vectors = embed_model.encode(flat_texts)
     else:
-        all_vectors = np.array([]).reshape(0, 384)
+        all_vectors = np.array([]).reshape(0, embed_model.dimension)
     
     # Build per-context indexes
     indexed_cache = {}
@@ -231,7 +286,7 @@ def encode_chunks_and_index(context_chunks: Dict, embed_model: EmbeddingModel) -
         chunk_ids = [c.chunk_id for c in chunks]
         
         # Build FAISS index
-        index = FaissIndex(dimension=384)
+        index = FaissIndex(dimension=embed_model.dimension)
         index.add(vectors, chunk_ids)
         
         chunk_map = {c.chunk_id: c for c in chunks}
@@ -358,7 +413,7 @@ def evaluate_config(chunker_type: str,
 # ═══════════════════════════════════════════════════════════════════════════
 # Grid Search
 # ═══════════════════════════════════════════════════════════════════════════
-def run_grid_search():
+def run_grid_search(model_name: str, model_dimension: int):
     """Run grid search over all (chunker_type, chunk_size, overlap) combinations."""
     print("\n" + "="*70)
     print(f"  🔍  HYPERPARAMETER GRID SEARCH")
@@ -372,7 +427,7 @@ def run_grid_search():
     
     # Load embedding model
     print(f"\n  🤖 Loading embedding model...")
-    embed_model = EmbeddingModel()
+    embed_model = EmbeddingModel(model_name=model_name, dimension=model_dimension)
     _ = embed_model.model  # Trigger lazy load
     print(f"     ✓ Model loaded")
     
@@ -662,34 +717,68 @@ def plot_top_configs(results: List[Dict]):
 # ═══════════════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════════════
+def set_seed(seed: int) -> None:
+    """Set random seeds for reproducibility."""
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    try:
+        import torch
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+    except ImportError:
+        pass
+
+
 def main():
     """Run hyperparameter grid search."""
     global CHUNKER_TYPES, DATA_PATH
-    
-    # Parse command line arguments
+
     args = parse_arguments()
-    
-    # Set chunker types to test
+    config = load_config(args.config)
+    embedding_config = config.get("embedding", {})
+    data_config = config.get("data", {})
+
+    seed = args.seed if args.seed is not None else config.get("seed", 42)
+    set_seed(seed)
+
+    model_name = args.model_name or embedding_config.get(
+        "model_name", EmbeddingModel.DEFAULT_MODEL_NAME
+    )
+    model_dimension = args.dimension if args.dimension is not None else embedding_config.get(
+        "dimension", EmbeddingModel.DEFAULT_DIMENSION
+    )
+
     if args.chunker:
         CHUNKER_TYPES = args.chunker
     else:
-        CHUNKER_TYPES = list(AVAILABLE_CHUNKERS.keys())  # Test all chunkers by default
+        CHUNKER_TYPES = list(AVAILABLE_CHUNKERS.keys())
+
+    # CLI override for dataset path
+    DATA_PATH = args.data or data_config.get("path", DATA_PATH)
     
-    # Set data path
-    DATA_PATH = args.data
-    
+    # Set OUTPUT_DIR based on dataset name
+    global OUTPUT_DIR
+    dataset_name = Path(DATA_PATH).stem  # e.g., "train_1000" from "data/train_1000.json"
+    OUTPUT_DIR = Path("results") / dataset_name / "hyperparameter_search"
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
     # Print configuration
     print("\n" + "="*70)
     print("  🚀  HYPERPARAMETER GRID SEARCH CONFIGURATION")
     print("="*70)
     print(f"  📋  Chunkers to test: {', '.join(CHUNKER_TYPES)}")
     print(f"  📂  Dataset: {DATA_PATH}")
+    print(f"  📁  Output directory: {OUTPUT_DIR}")
     print(f"  🔢  Chunk sizes: {CHUNK_SIZES}")
     print(f"  ↔️   Overlaps: {OVERLAPS}")
+    print(f"  🧠  Embedding model: {model_name} (dim={model_dimension})")
+    print(f"  🎲  Random seed: {seed}")
     print("="*70)
     
     # Run grid search
-    results = run_grid_search()
+    results = run_grid_search(model_name, model_dimension)
     
     if not results:
         print("\n  ❌ No valid results obtained!")

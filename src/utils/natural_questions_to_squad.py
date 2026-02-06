@@ -1,6 +1,6 @@
 """
-Natural Questions to SQuAD Format Converter
-===========================================
+Natural Questions → SQuAD Format Converter
+==========================================
 
 Converts Google's Natural Questions dataset to SQuAD-compatible format.
 
@@ -622,13 +622,13 @@ def main():
         epilog="""
 Examples:
   # Convert first 100 examples
-  python nq_to_squad_converter.py --sample 100
+  python natural_questions_to_squad.py --sample 100
   
   # Convert all examples with custom output
-  python nq_to_squad_converter.py --output my_data.json
+  python natural_questions_to_squad.py --output my_data.json
   
   # Enable debug logging
-  python nq_to_squad_converter.py --log-level DEBUG --sample 10
+  python natural_questions_to_squad.py --log-level DEBUG --sample 10
         """
     )
     

@@ -1,6 +1,13 @@
+"""
+squad_v2_loader.py
+───────────────────
+Explicit SQuAD v2 dataset loader.
+"""
+
 import json
 import os
 from datasets import load_dataset
+
 
 def load_squad_v2(split="validation"):
     """
@@ -40,6 +47,7 @@ def load_squad_v2(split="validation"):
 
     return {"data": data_list, "summary": summary}
 
+
 def save_subset(data_dict, n, filename):
     """
     Save the first n examples and summary to a JSON file.
@@ -56,6 +64,7 @@ def save_subset(data_dict, n, filename):
 
     print(f"Saved {len(subset)} examples to {filename}")
     print("Summary:", data_dict["summary"])
+
 
 if __name__ == "__main__":
     for split in ["train", "validation"]:

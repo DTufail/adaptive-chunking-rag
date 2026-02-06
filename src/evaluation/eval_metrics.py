@@ -60,9 +60,12 @@ OUTPUT:
   Raw results saved to: results/eval_metrics.json
 """
 
+import argparse
+import hashlib
 import json
-import sys
 import os
+import random
+import sys
 import time
 from typing import List, Dict, Optional, Tuple
 from collections import defaultdict
@@ -74,44 +77,49 @@ import numpy as np
 src_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
 sys.path.insert(0, os.path.join(src_path, 'src'))
 
-from chunkers import FixedChunker, SentenceChunker, ParagraphChunker, RecursiveChunker, StructureAwareChunker, SemanticDensityChunker
 from embeddings.embedding_model import EmbeddingModel
 from embeddings.faiss_index import FaissIndex
+from utils.config import load_config, build_chunkers
 from utils.text_preprocessor import preprocess_context, detect_html_content
 
 
 # ─── Config ──────────────────────────────────────────────────────────────────
-#DATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'data', 'train_1000.json')
-DATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'data', 'natural_questions_squad_1000.json')
-#DATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'data', 'train_1000.json')
-K_MAX    = 5                # Single search depth. All Hit@K derived from it.
-K_VALUES = [1, 3, 5]        # Which K values to report.
-MIN_ANSWER_LENGTH = 4       # Answers shorter than this are filtered out.
-OUTPUT_DIR = "results"      # Where to write results JSON.
-PREPROCESS_HTML = True      # Preprocess HTML content (for Wikipedia/NQ data)
 
-
-# ─── Chunker configs — identical to test_retrieval.py ───────────────────────
-CHUNKERS: Dict[str, object] = {
-    #"FixedChunker":     FixedChunker(chunk_size=512, overlap=50),
-    #"SentenceChunker":  SentenceChunker(max_chars=512, overlap_sentences=1),
-    #"ParagraphChunker": ParagraphChunker(max_chars=512, min_chars=100),
-    ##"RecursiveChunker": RecursiveChunker(max_chars=512, overlap=50),
-    "FixedChunker": FixedChunker(chunk_size=1024, overlap=50),
-    "RecursiveChunker": RecursiveChunker(max_chars=1024, overlap=50),
-    "ParagraphChunker": ParagraphChunker(max_chars=1024, min_chars=200),
-    "SemanticDensityChunker": SemanticDensityChunker(
-        chunk_size=1024,
-        min_overlap=50,
-        max_overlap=50,
-        density_window=300
-    ),
-    "StructureAwareChunker": StructureAwareChunker(
-        chunk_size=1024,
-        min_chunk_size=200,  # Lowered from 512 to preserve small sections
-        overlap=50
-    ),
-}
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Evaluate chunking strategies for RAG retrieval."
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to YAML config file (default: configs/default.yaml)",
+    )
+    parser.add_argument(
+        "--data",
+        type=str,
+        default=None,
+        help="Path to dataset file (overrides config data.path)",
+    )
+    
+    # HTML preprocessing control (mutually exclusive)
+    preprocess_group = parser.add_mutually_exclusive_group()
+    preprocess_group.add_argument(
+        "--preprocess-html",
+        action="store_true",
+        dest="preprocess_html",
+        help="Enable HTML preprocessing (for Natural Questions dataset)",
+    )
+    preprocess_group.add_argument(
+        "--no-preprocess-html",
+        action="store_false",
+        dest="preprocess_html",
+        help="Disable HTML preprocessing (for SQuAD dataset)",
+    )
+    parser.set_defaults(preprocess_html=None)  # None = use config default
+    
+    return parser.parse_args()
 
 # ─── Data loading ────────────────────────────────────────────────────────────
 def load_and_filter(path: str, min_answer_len: int, preprocess_html: bool = True) -> Tuple[List[dict], Dict[str, int]]:
@@ -163,6 +171,7 @@ def load_and_filter(path: str, min_answer_len: int, preprocess_html: bool = True
 # ─── Phase A: chunk all unique contexts ─────────────────────────────────────
 def chunk_all_contexts(
     examples: List[dict],
+    chunkers: Dict[str, object],
 ) -> Dict[str, Dict[str, list]]:
     """Run every chunker on every unique context. No encoding here.
 
@@ -172,6 +181,7 @@ def chunk_all_contexts(
 
     Args:
         examples: Filtered example list.
+        chunkers: Dict mapping chunker names to chunker instances.
 
     Returns:
         Nested dict:  { chunker_name: { context_text: [Chunk, ...] } }
@@ -187,11 +197,11 @@ def chunk_all_contexts(
 
     chunked: Dict[str, Dict[str, list]] = {}
 
-    for chunker_name, chunker in CHUNKERS.items():
+    for chunker_name, chunker in chunkers.items():
         context_chunks: Dict[str, list] = {}
         for ctx in unique_contexts:
-            # doc_id is keyed on context content so it's stable across questions
-            doc_id = f"ctx_{hash(ctx) % (10**8)}"
+            # doc_id is keyed on context content — deterministic across runs
+            doc_id = f"ctx_{hashlib.sha256(ctx.encode()).hexdigest()[:8]}"
             chunks = chunker.chunk(ctx, document_id=doc_id)
             if chunks:
                 context_chunks[ctx] = chunks
@@ -268,7 +278,7 @@ def encode_all(
             vectors     = all_vectors[start:end]                     # (n_chunks, 384)
             chunk_ids   = [c.chunk_id for c in chunks]
 
-            index = FaissIndex(dimension=EmbeddingModel.DIMENSION)
+            index = FaissIndex(dimension=embed_model.dimension)
             index.add(vectors, chunk_ids)
 
             # Build chunk_map once, cache it — not on every search call.
@@ -385,6 +395,9 @@ def print_results_table(
     num_examples: int,
     num_unique_contexts: int,
     elapsed: float,
+    k_values: List[int],
+    min_answer_length: int,
+    k_max: int,
 ) -> None:
     """Print the final comparison table, sorted by MRR descending.
 
@@ -393,36 +406,91 @@ def print_results_table(
         num_examples: Number of examples evaluated.
         num_unique_contexts: Number of unique contexts in the dataset.
         elapsed: Total wall-clock seconds.
+        k_values: Which K values to report.
+        min_answer_length: Minimum answer length filter.
+        k_max: Search depth.
     """
     print("\n" + "=" * 68)
     print("  📊  PHASE 4 RESULTS — Chunker Comparison")
     print("=" * 68)
     print(f"  Examples evaluated  : {num_examples}")
     print(f"  Unique contexts     : {num_unique_contexts}")
-    print(f"  Answer filter       : min {MIN_ANSWER_LENGTH} chars")
-    print(f"  Search depth (K)    : {K_MAX}")
+    print(f"  Answer filter       : min {min_answer_length} chars")
+    print(f"  Search depth (K)    : {k_max}")
     print(f"  Wall-clock time     : {elapsed:.1f}s")
     print()
 
     # Header
-    k_header = "".join(f"{'Hit@' + str(k):>9}" for k in K_VALUES)
+    k_header = "".join(f"{'Hit@' + str(k):>9}" for k in k_values)
     print(f"  {'Chunker':<22} {k_header} {'MRR':>9}")
-    print(f"  {'─' * 22} " + " ────────" * len(K_VALUES) + " ────────")
+    print(f"  {'─' * 22} " + " ────────" * len(k_values) + " ────────")
 
     # Rows sorted by MRR descending
     for name, agg in sorted(aggregated.items(), key=lambda x: x[1]["rr"], reverse=True):
-        k_vals = "".join(f"{agg[f'hit@{k}']:>9.4f}" for k in K_VALUES)
+        k_vals = "".join(f"{agg[f'hit@{k}']:>9.4f}" for k in k_values)
         print(f"  {name:<22} {k_vals} {agg['rr']:>9.4f}")
 
     print("=" * 68)
 
 
+# ─── Reproducibility ─────────────────────────────────────────────────────────
+def set_seed(seed: int) -> None:
+    """Set random seeds for reproducibility.
+
+    Args:
+        seed: Integer seed value.
+    """
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    try:
+        import torch
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+    except ImportError:
+        pass
+
+
 # ─── Main ────────────────────────────────────────────────────────────────────
 def main() -> None:
+    # ── 0. Load config ───────────────────────────────────────────────────────
+    args = parse_args()
+    config = load_config(args.config)
+
+    # Set seed for reproducibility
+    seed = config.get("seed", 42)
+    set_seed(seed)
+    print(f"  🎲  Random seed: {seed}")
+
+    # CLI overrides for data path and HTML preprocessing
+    data_path         = args.data if args.data else config["data"]["path"]
+    min_answer_length = config["data"]["min_answer_length"]
+    
+    # Determine HTML preprocessing: CLI arg > auto-detect > config
+    if args.preprocess_html is not None:
+        # Explicit CLI override
+        preprocess_html = args.preprocess_html
+    elif "squad" in data_path.lower():
+        # Auto-detect: SQuAD datasets don't need HTML preprocessing
+        preprocess_html = False
+    elif "natural_questions" in data_path.lower():
+        # Auto-detect: NQ datasets need HTML preprocessing
+        preprocess_html = True
+    else:
+        # Fall back to config default
+        preprocess_html = config["data"]["preprocess_html"]
+    
+    k_max             = config["evaluation"]["k_max"]
+    k_values          = config["evaluation"]["k_values"]
+    output_dir        = config["evaluation"]["output_dir"]
+
+    chunkers = build_chunkers(config)
+
     # ── 1. Load & filter ─────────────────────────────────────────────────────
     print("\n⏳  Loading and filtering dataset...")
-    print(f"  HTML preprocessing: {'enabled' if PREPROCESS_HTML else 'disabled'}")
-    examples, drop_counts = load_and_filter(DATA_PATH, MIN_ANSWER_LENGTH, PREPROCESS_HTML)
+    print(f"  HTML preprocessing: {'enabled' if preprocess_html else 'disabled'}")
+    examples, drop_counts = load_and_filter(data_path, min_answer_length, preprocess_html)
 
     print(f"  Valid examples : {len(examples)}")
     for reason, count in drop_counts.items():
@@ -434,11 +502,14 @@ def main() -> None:
 
     # ── 2. Init embedding model ─────────────────────────────────────────────
     print("\n⏳  Loading embedding model (downloads on first use if needed)...")
-    embed_model = EmbeddingModel()
+    embedding_config = config.get("embedding", {})
+    model_name = embedding_config.get("model_name", EmbeddingModel.DEFAULT_MODEL_NAME)
+    model_dimension = embedding_config.get("dimension", EmbeddingModel.DEFAULT_DIMENSION)
+    embed_model = EmbeddingModel(model_name=model_name, dimension=model_dimension)
 
     # ── 3. Phase A: chunk all unique contexts (no model calls) ──────────────
     print("\n⏳  Phase A — chunking all unique contexts...")
-    chunked = chunk_all_contexts(examples)
+    chunked = chunk_all_contexts(examples, chunkers)
     # ── Chunk size statistics (post-Phase A) ───────────────────────────────
     for chunker_name, context_chunks in chunked.items():
         chunk_sizes = [
@@ -516,7 +587,7 @@ def main() -> None:
 
 
     num_unique = len(set(ex["context"] for ex in examples))
-    print(f"  {num_unique} unique contexts chunked across {len(CHUNKERS)} chunkers.")
+    print(f"  {num_unique} unique contexts chunked across {len(chunkers)} chunkers.")
 
     # ── 4. Phase B: batch-encode everything (all forward passes) ────────────
     print("\n⏳  Phase B — batch encoding (all model inference runs here)...")
@@ -524,11 +595,11 @@ def main() -> None:
 
     # ── 5. Phase C: eval loop (zero model calls) ───────────────────────────
     total = len(examples)
-    print(f"\n⏳  Phase C — evaluating {total} examples × {len(CHUNKERS)} chunkers...")
+    print(f"\n⏳  Phase C — evaluating {total} examples × {len(chunkers)} chunkers...")
     print(f"    (all indexes pre-built, zero encode calls in this loop)\n")
 
     per_example_hit_ranks: Dict[str, List[Optional[int]]] = {
-        name: [] for name in CHUNKERS
+        name: [] for name in chunkers
     }
 
     start_time = time.time()
@@ -538,8 +609,8 @@ def main() -> None:
         answer  = example["answer"]
         query_vector = question_vectors[i]
 
-        for chunker_name in CHUNKERS:
-            results  = search_cached(indexed_cache, chunker_name, context, query_vector, k=K_MAX)
+        for chunker_name in chunkers:
+            results  = search_cached(indexed_cache, chunker_name, context, query_vector, k=k_max)
             hit_rank = compute_hit_rank(results, answer)
             per_example_hit_ranks[chunker_name].append(hit_rank)
 
@@ -553,28 +624,39 @@ def main() -> None:
     aggregated: Dict[str, dict] = {}
 
     for chunker_name, hit_ranks in per_example_hit_ranks.items():
-        all_metrics = [derive_metrics(hr, K_VALUES) for hr in hit_ranks]
+        all_metrics = [derive_metrics(hr, k_values) for hr in hit_ranks]
         agg: dict = {}
         for key in all_metrics[0]:
             agg[key] = sum(m[key] for m in all_metrics) / len(all_metrics)
         aggregated[chunker_name] = agg
 
     # ── 7. Print table ──────────────────────────────────────────────────────
-    print_results_table(aggregated, total, num_unique, elapsed)
+    print_results_table(aggregated, total, num_unique, elapsed, k_values, min_answer_length, k_max)
 
     # ── 8. Save to JSON ─────────────────────────────────────────────────────
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    output_path = os.path.join(OUTPUT_DIR, "eval_metrics.json")
+    # Create dataset-specific output directory
+    dataset_name = os.path.splitext(os.path.basename(data_path))[0]  # e.g., "train_1000"
+    dataset_output_dir = os.path.join(output_dir, dataset_name)
+    os.makedirs(dataset_output_dir, exist_ok=True)
+    output_path = os.path.join(dataset_output_dir, "eval_metrics.json")
+
+    # Store relative path for portability
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+    relative_data_path = os.path.relpath(data_path, project_root)
 
     save_payload = {
         "config": {
-            "data_path":         DATA_PATH,
+            "data_path":         relative_data_path,
             "num_examples":      total,
             "num_unique_contexts": num_unique,
-            "k_max":             K_MAX,
-            "k_values":          K_VALUES,
-            "min_answer_length": MIN_ANSWER_LENGTH,
-            "chunkers":          {name: repr(c) for name, c in CHUNKERS.items()},
+            "k_max":             k_max,
+            "k_values":          k_values,
+            "min_answer_length": min_answer_length,
+            "embedding": {
+                "model_name": model_name,
+                "dimension": embed_model.dimension,
+            },
+            "chunkers":          {name: repr(c) for name, c in chunkers.items()},
             "elapsed_seconds":   round(elapsed, 2),
         },
         "aggregated": aggregated,

@@ -1,8 +1,35 @@
+# Virtual environments
 .venv/
 myenv/
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+
+# Temporary / build
+*.npy
+build/
+dist/
 .ipynb_checkpoints/
+
+# OS
 .DS_Store
+
+# Secrets
 .env
-results/
+
+# IDE
+.vscode/
+
+# Logs
+output.log
+*.log
+
+# Results/analysis are regenerated — don't commit stale outputs.
+# Run the eval/analysis scripts to regenerate.
+results/eval_metrics.json
+results/hyperparameter_search/
+results/visualizations/
+analysis/
